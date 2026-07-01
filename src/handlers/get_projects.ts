@@ -5,10 +5,20 @@ export async function handleGetProjects(tp: TpClient) {
   const response = await tp.getProjects<TP.TpResponse<TP.Project>>()
 
   if (!response) {
+    const diagnostic = tp.getLastRequestDiagnostic?.()
+    const details = diagnostic
+      ? [
+        `Error: ${diagnostic.message}`,
+        `Request: ${diagnostic.method} ${diagnostic.url}`,
+        diagnostic.status !== undefined ? `Status: ${diagnostic.status}` : undefined,
+        diagnostic.body ? `Body: ${diagnostic.body}` : undefined,
+      ].filter(Boolean).join('\n')
+      : `JSON: ${JSON.stringify(response, null, 2)}`
+
     return {
       content: [{
         type: 'text' as const,
-        text: `Failed to get projects, JSON: ${JSON.stringify(response, null, 2)}`
+        text: `Failed to get projects\n${details}`
       }],
     }
   }

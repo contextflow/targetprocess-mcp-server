@@ -4,6 +4,14 @@ import { ProxyAgent, type Dispatcher } from "undici";
 
 type TpFetchInit = RequestInit
 
+export type TpRequestDiagnostic = {
+  method: string
+  url: string
+  message: string
+  status?: number
+  body?: string
+}
+
 function tpString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
@@ -84,6 +92,8 @@ export class TpClient {
   private token: string = config.tp.token
   private headers: Record<string, string>
   private dispatcher: Dispatcher | undefined = createTpDispatcher(config.tp.proxySocket)
+  private loggedInOwnerId: string | undefined
+  private lastRequestDiagnostic: TpRequestDiagnostic | undefined
   private readonly v2 = '/api/v2'
   private readonly debugHttp = process.env.TP_DEBUG_HTTP === "1"
 
@@ -117,8 +127,66 @@ export class TpClient {
     }
   }
 
-  private async fetch(url: string, init: TpFetchInit) {
+  protected async fetch(url: string, init: TpFetchInit) {
     return fetch(url, buildTpFetchInit(init, this.dispatcher))
+  }
+
+  getLastRequestDiagnostic(): TpRequestDiagnostic | undefined {
+    return this.lastRequestDiagnostic
+  }
+
+  private clearRequestDiagnostic(): void {
+    this.lastRequestDiagnostic = undefined
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+  }
+
+  private truncate(text: string, maxLength = 1000): string {
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+  }
+
+  private redactText(text: string): string {
+    const withoutQueryToken = text.replace(/access_token=[^&\s"]*/g, "access_token=***")
+    return this.token ? withoutQueryToken.replaceAll(this.token, "***") : withoutQueryToken
+  }
+
+  private recordRequestDiagnostic({
+    method,
+    url,
+    message,
+    status,
+    body,
+  }: {
+    method: string
+    url: string
+    message: string
+    status?: number
+    body?: string
+  }): void {
+    this.lastRequestDiagnostic = {
+      method,
+      url: this.redactUrl(url),
+      message: this.redactText(message),
+      ...(status !== undefined ? { status } : {}),
+      ...(body ? { body: this.truncate(this.redactText(body)) } : {}),
+    }
+  }
+
+  private async ownerId(): Promise<string | null> {
+    if (config.tp.ownerId) return config.tp.ownerId
+    if (this.loggedInOwnerId) return this.loggedInOwnerId
+
+    const context = await this.getContext<{ LoggedUser?: { Id?: string | number } }>()
+    const id = context?.LoggedUser?.Id
+    if (id === undefined || id === null || id === "") {
+      console.error("Unable to resolve Targetprocess logged-in user ID")
+      return null
+    }
+
+    this.loggedInOwnerId = String(id)
+    return this.loggedInOwnerId
   }
 
   // @ts-ignore
@@ -143,17 +211,59 @@ export class TpClient {
   private async get<T>(params: TpClientParameters): Promise<T | null> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
+    this.clearRequestDiagnostic()
+    if (!this.token) {
+      this.recordRequestDiagnostic({
+        method: "GET",
+        url: _url,
+        message: "TP_TOKEN is required",
+      })
+      console.error("Error making TP request:", "TP_TOKEN is required");
+      console.error("Request URL:", this.redactUrl(_url));
+      return null
+    }
+
     try {
       const response = await this.fetch(_url, {
         method: "GET",
         headers: this.headers
       });
+      const text = await response.text()
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        this.recordRequestDiagnostic({
+          method: "GET",
+          url: _url,
+          message: `HTTP error! status: ${response.status}`,
+          status: response.status,
+          body: text,
+        })
+        const diagnostic = this.getLastRequestDiagnostic()
+        console.error("Error making TP request:", diagnostic?.message);
+        console.error("Request URL:", diagnostic?.url);
+        return null
       }
 
-      return (await response.json()) as T
+      try {
+        return (text ? JSON.parse(text) : null) as T
+      } catch (error) {
+        this.recordRequestDiagnostic({
+          method: "GET",
+          url: _url,
+          message: `Failed to parse Targetprocess JSON response: ${this.errorMessage(error)}`,
+          status: response.status,
+          body: text,
+        })
+        const diagnostic = this.getLastRequestDiagnostic()
+        console.error("Error parsing TP response:", error);
+        console.error("Request URL:", diagnostic?.url);
+        return null
+      }
     } catch (error) {
+      this.recordRequestDiagnostic({
+        method: "GET",
+        url: _url,
+        message: this.errorMessage(error),
+      })
       console.error("Error making TP request:", error);
       console.error("Request URL:", this.redactUrl(_url));
       return null;
@@ -988,11 +1098,14 @@ export class TpClient {
     description?: string
     date?: string
   }): Promise<T> {
+    const ownerId = await this.ownerId()
+    if (!ownerId) return null as T
+
     const timestamp = date ? new Date(date).getTime() : Date.now()
     const body: Record<string, any> = {
       Spent: hours,
       Date: `/Date(${timestamp})/`,
-      User: { Id: config.tp.ownerId },
+      User: { Id: ownerId },
       Assignable: { Id: entityId, ResourceType: entityType },
     }
     if (description) body["Description"] = description
@@ -1004,11 +1117,14 @@ export class TpClient {
   }
 
   async getMyTimeLogs<T>(take: number = 25): Promise<T> {
+    const ownerId = await this.ownerId()
+    if (!ownerId) return null as T
+
     return this.get<T>({
       pathParam: ["Times"],
       param: {
         "format": "json",
-        "where": `User.Id eq ${config.tp.ownerId}`,
+        "where": `User.Id eq ${ownerId}`,
         "include": "[Id,Spent,Date,Description,Assignable[Id,Name,ResourceType]]",
         "orderByDesc": "Date",
         "take": take,
@@ -1017,7 +1133,10 @@ export class TpClient {
   }
 
   async getMyUserStories<T>({ state, take = 25, skip = 0 }: { state?: string, take?: number, skip?: number }): Promise<T> {
-    const whereParts = [`AssignedUser.Id eq ${config.tp.ownerId}`]
+    const ownerId = await this.ownerId()
+    if (!ownerId) return null as T
+
+    const whereParts = [`AssignedUser.Id eq ${ownerId}`]
     if (state) whereParts.push(`EntityState.Name contains ${tpString(state)}`)
 
     return this.get<T>({
@@ -1034,7 +1153,10 @@ export class TpClient {
   }
 
   async getMyBugs<T>({ state, take = 25, skip = 0 }: { state?: string, take?: number, skip?: number }): Promise<T> {
-    const whereParts = [`AssignedUser.Id eq ${config.tp.ownerId}`]
+    const ownerId = await this.ownerId()
+    if (!ownerId) return null as T
+
+    const whereParts = [`AssignedUser.Id eq ${ownerId}`]
     if (state) whereParts.push(`EntityState.Name contains ${tpString(state)}`)
 
     return this.get<T>({

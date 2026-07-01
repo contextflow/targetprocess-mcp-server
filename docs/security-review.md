@@ -60,8 +60,10 @@ The default Nix app starts tinyproxy outside the Node jail, configured with:
 - a filter containing only the exact hostname from `TP_BASE_URL`
 - no persistent log file
 
-The wrapper validates `TP_BASE_URL` in shell before starting proxy processes. It rejects credentials, query strings, fragments, explicit ports, whitespace, unsupported hostname characters, and non-HTTPS URLs.
+The wrapper validates `TP_BASE_URL` in shell before starting proxy processes. It rejects credentials, query strings, fragments, explicit ports, whitespace, unsupported hostname characters, and non-HTTPS URLs. It also requires a non-empty `TP_TOKEN` so failed secret retrieval cannot start a partly functional MCP that serves local tools but sends unauthenticated Targetprocess requests.
 
 The wrapper then starts a private Unix socket bridge with `socat` and runs the MCP server in bubblewrap without direct network access. The jailed process receives `TP_PROXY_SOCKET` and uses `undici.ProxyAgent` with global `fetch` to connect through that socket. The proxy configuration directory is not mounted into the jail; only the socket directory is mounted read-only. This keeps the OS-level egress path limited to the tinyproxy allowlist while preserving stdio MCP behavior.
+
+The jailed process also receives a read-only CA bundle from `pkgs.cacert` via `SSL_CERT_FILE` and `NODE_EXTRA_CA_CERTS`. This is required for Node.js TLS verification after removing jail.nix `network`, which otherwise supplied broader system network and certificate bindings.
 
 The proxy wrapper fails closed if tinyproxy cannot bind or if the Unix socket bridge cannot be created. If tinyproxy or socat exits after startup, the jailed Node process still has no direct network namespace and subsequent Targetprocess calls fail instead of bypassing the proxy.

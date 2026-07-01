@@ -44,6 +44,9 @@
           jailed-node = jail "targetprocess-mcp-server-jailed-node" targetprocess-mcp-server (
             c: with c; [
               (ro-bind (noescape "\"$TP_PROXY_SOCKET_DIR\"") (noescape "\"$TP_PROXY_SOCKET_DIR\""))
+              (ro-bind "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" "/etc/ssl/certs/ca-bundle.crt")
+              (set-env "SSL_CERT_FILE" "/etc/ssl/certs/ca-bundle.crt")
+              (set-env "NODE_EXTRA_CA_CERTS" "/etc/ssl/certs/ca-bundle.crt")
               (fwd-env "TP_BASE_URL")
               (fwd-env "TP_TOKEN")
               (fwd-env "TP_PROXY_SOCKET")
@@ -67,6 +70,11 @@
             text = ''
               if [ -z "''${TP_BASE_URL:-}" ]; then
                 echo "TP_BASE_URL is required" >&2
+                exit 1
+              fi
+
+              if [ -z "''${TP_TOKEN:-}" ]; then
+                echo "TP_TOKEN is required" >&2
                 exit 1
               fi
 

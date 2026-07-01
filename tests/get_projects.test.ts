@@ -4,6 +4,7 @@ import type { TpClient } from '../src/tp.js'
 
 const mockTp = {
   getProjects: vi.fn(),
+  getLastRequestDiagnostic: vi.fn(),
 } as unknown as TpClient
 
 beforeEach(() => {
@@ -35,6 +36,20 @@ describe('handleGetProjects', () => {
     const result = await handleGetProjects(mockTp)
 
     expect(result.content[0].text).toContain('Failed to get projects')
+  })
+
+  it('includes redacted request diagnostics when available', async () => {
+    vi.mocked(mockTp.getProjects).mockResolvedValue(null as any)
+    vi.mocked(mockTp.getLastRequestDiagnostic).mockReturnValue({
+      method: 'GET',
+      url: 'https://example.tpondemand.com/api/v1/Projects/?access_token=***',
+      message: 'unable to get local issuer certificate',
+    })
+
+    const result = await handleGetProjects(mockTp)
+
+    expect(result.content[0].text).toContain('unable to get local issuer certificate')
+    expect(result.content[0].text).toContain('GET https://example.tpondemand.com/api/v1/Projects/?access_token=***')
   })
 
   it('returns not found message when Items is empty', async () => {

@@ -155,6 +155,7 @@ nix run path:/home/pl/static/software/targetprocess-mcp-server
 For the jailed runtime, `TP_BASE_URL` must be a simple HTTPS URL with no credentials, query string, fragment, or explicit port. Use `nix run .#unjailed` only when you intentionally want to run without the bubblewrap/tinyproxy egress restriction.
 
 The generic MCP config template is in `examples/targetprocess.mcp.json`.
+Detailed setup notes for Codex, password-manager-backed tokens, and startup troubleshooting are in `docs/targetprocess-setup.md`.
 
 To rediscover or change the remaining values, start with `TP_BASE_URL` and `TP_TOKEN`, then use:
 
