@@ -217,32 +217,71 @@ server.registerTool('search_tp_cards', {
   },
 },
   async ({ keyword, entityType = "UserStories" }) => {
-    const results = await Promise.all<TP.TpResponse<TP.General>>([
-      tp.searchContainsNameText<TP.TpResponse<TP.UserStory>>({ text: keyword, entityType }),
-      tp.searchContainsDescriptionText<TP.TpResponse<TP.General>>({ text: keyword, entityType })
-    ])
-    if (!results) {
-      return {
-        content: [{
-          type: 'text',
-          text: `Failed to search for keyword: "${keyword}"\n JSON: ${JSON.stringify(results, null, 2)}`
-        }],
-      }
+    const searchEntity = async (text: string, type: "UserStories" | "Bugs" | "Generals") => {
+      const results = await Promise.all([
+        tp.searchContainsNameText<TP.TpResponse<TP.General>>({ text, entityType: type }),
+        tp.searchContainsDescriptionText<TP.TpResponse<TP.General>>({ text, entityType: type })
+      ])
+      return results
+        .filter((result): result is TP.TpResponse<TP.General> => Boolean(result))
+        .flatMap((result) => result.Items || [])
     }
 
-    const items = results.map((item: TP.TpResponse<TP.General>) => item.Items).flat()
+    const itemById = new Map<number, TP.General>()
+    const addItems = (itemsToAdd: TP.General[]) => {
+      for (const item of itemsToAdd) itemById.set(item.Id, item)
+    }
+
+    addItems(await searchEntity(keyword, entityType))
+    if (itemById.size === 0 && entityType !== "Generals") {
+      addItems(await searchEntity(keyword, "Generals"))
+    }
+
+    const terms = keyword
+      .split(/\s+/)
+      .map((term) => term.trim())
+      .filter((term) => term.length >= 3)
+
+    if (itemById.size === 0 && terms.length > 1) {
+      const candidateTypes = entityType === "Generals" ? ["Generals"] as const : [entityType, "Generals"] as const
+      const candidates = new Map<number, TP.General>()
+
+      for (const term of terms) {
+        for (const type of candidateTypes) {
+          const termItems = await searchEntity(term, type)
+          for (const item of termItems) {
+            candidates.set(item.Id, item)
+          }
+        }
+      }
+
+      const scored = [...candidates.values()]
+        .map((item) => {
+          const haystack = `${item.Name || ""}\n${item.Description || ""}`.toLowerCase()
+          const score = terms.reduce((count, term) => count + (haystack.includes(term.toLowerCase()) ? 1 : 0), 0)
+          return { item, score }
+        })
+        .filter(({ score }) => score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map(({ item }) => item)
+
+      itemById.clear()
+      addItems(scored)
+    }
+
+    const items = [...itemById.values()]
 
     if (items.length == 0) {
       return {
         content: [{
           type: 'text',
-          text: `Failed to find card by keyword: "${keyword}"\n JSON: ${JSON.stringify(results, null, 2)}`
+          text: `Failed to find card by keyword: "${keyword}"`
         }],
       }
     }
 
     const parsedItems = items.map((item) => {
-      const dom = new JSDOM(`<html><body><div id="content">${item.Description}</div></body></html>`)
+      const dom = new JSDOM(`<html><body><div id="content">${item.Description || ''}</div></body></html>`)
       const descriptionText = dom.window.document.getElementById('content')?.textContent
       return {
         title: item.Name,
@@ -1813,7 +1852,7 @@ server.registerTool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Weather MCP Server running on stdio");
+  console.error("Targetprocess MCP Server running on stdio");
 }
 
 main().catch((error) => {

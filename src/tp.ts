@@ -1,7 +1,9 @@
-import { readFileSync } from "fs";
-import { basename } from "path";
 import { TpClientParameters, TpResponse, TpResult, Relation, BugInputSchema, Bug, Task, LoggedUser } from "./types.js";
 import { config } from "./config.js";
+
+function tpString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
 
 export class TpClient {
 
@@ -10,6 +12,7 @@ export class TpClient {
   private headers: HeadersInit
   private readonly v1 = '/api/v1'
   private readonly v2 = '/api/v2'
+  private readonly debugHttp = process.env.TP_DEBUG_HTTP === "1"
 
   constructor() {
     this.headers = {
@@ -29,6 +32,25 @@ export class TpClient {
       _urlParams.push(`${key}=${encodeURIComponent(value)}`)
     }
     return _url + "/?" + _urlParams.join("&")
+  }
+
+  private redactUrl(url: string): string {
+    try {
+      const parsed = new URL(url)
+      if (parsed.searchParams.has("access_token")) {
+        parsed.searchParams.set("access_token", "***")
+      }
+      return parsed.toString()
+    } catch {
+      const redacted = url.replace(/access_token=[^&\s]*/g, "access_token=***")
+      return this.token ? redacted.replaceAll(this.token, "***") : redacted
+    }
+  }
+
+  private debug(label: string, value: unknown): void {
+    if (this.debugHttp) {
+      console.error(JSON.stringify({ [label]: value }))
+    }
   }
 
   // @ts-ignore
@@ -65,7 +87,7 @@ export class TpClient {
       return (await response.json()) as T
     } catch (error) {
       console.error("Error making TP request:", error);
-      console.error("Request URL:", _url);
+      console.error("Request URL:", this.redactUrl(_url));
       return null;
     }
   }
@@ -73,8 +95,8 @@ export class TpClient {
   private async post<T, U>(params: TpClientParameters, data: T): Promise<U | null> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
-    console.error(JSON.stringify({ "TP_POST_URL": _url }))
-    console.error(JSON.stringify({ "TP_POST_BODY": data }))
+    this.debug("TP_POST_URL", this.redactUrl(_url))
+    this.debug("TP_POST_BODY", data)
     try {
       const response = await fetch(_url, {
         method: "POST",
@@ -96,8 +118,8 @@ export class TpClient {
   private async postRaw<T, U>(params: TpClientParameters, data: T): Promise<TpResult<U>> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
-    console.error(JSON.stringify({ "TP_POST_URL": _url }))
-    console.error(JSON.stringify({ "TP_POST_BODY": data }))
+    this.debug("TP_POST_URL", this.redactUrl(_url))
+    this.debug("TP_POST_BODY", data)
     try {
       const response = await fetch(_url, {
         method: "POST",
@@ -106,7 +128,7 @@ export class TpClient {
       });
       const text = await response.text()
       if (!response.ok) {
-        console.error(JSON.stringify({ "TP_POST_ERROR_STATUS": response.status, "TP_POST_ERROR_BODY": text }))
+        this.debug("TP_POST_ERROR", { status: response.status, body: text })
         return { ok: false, status: response.status, body: text }
       }
       return { ok: true, data: (text ? JSON.parse(text) : null) as U }
@@ -121,7 +143,7 @@ export class TpClient {
   private async del<U>(params: TpClientParameters): Promise<TpResult<U>> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
-    console.error(JSON.stringify({ "TP_DELETE_URL": _url }))
+    this.debug("TP_DELETE_URL", this.redactUrl(_url))
     try {
       const response = await fetch(_url, {
         method: "DELETE",
@@ -129,7 +151,7 @@ export class TpClient {
       });
       const text = await response.text()
       if (!response.ok) {
-        console.error(JSON.stringify({ "TP_DELETE_ERROR_STATUS": response.status, "TP_DELETE_ERROR_BODY": text }))
+        this.debug("TP_DELETE_ERROR", { status: response.status, body: text })
         return { ok: false, status: response.status, body: text }
       }
       return { ok: true, data: (text ? JSON.parse(text) : null) as U }
@@ -549,7 +571,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": "25",
-        "where": `Name contains '${text}'`,
+        "where": `Name contains ${tpString(text)}`,
         "include": "[Name, Description, Id]"
       },
     }) as T
@@ -559,9 +581,10 @@ export class TpClient {
     return this.get<T>({
       pathParam: [entityType],
       param: {
-        "where": `Description contains '${text}' and EntityState.Name eq 'Done'`,
+        "where": `Description contains ${tpString(text)}`,
         "format": "json",
         "take": "50",
+        "include": "[Name, Description, Id]",
       },
     }) as T
   }
@@ -583,7 +606,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}'`,
+        "where": `Release.Name eq ${tpString(name)}`,
         "include": includeFilter,
       }
     }) as T
@@ -596,7 +619,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}' and EntityState.Name ne 'Closed' and EntityState.Name ne 'Done' and EntityState.Name ne 'Passed Dev01  QA' and EntityState.Name ne 'Ready to Deploy to prod'`,
+        "where": `Release.Name eq ${tpString(name)} and EntityState.Name ne 'Closed' and EntityState.Name ne 'Done' and EntityState.Name ne 'Passed Dev01  QA' and EntityState.Name ne 'Ready to Deploy to prod'`,
         "include": includeFilter,
       }
     }) as T
@@ -609,7 +632,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}' and EntityState.Name ne 'Closed' and EntityState.Name ne 'Done' and EntityState.Name ne 'Passed Dev01  QA' and EntityState.Name ne 'Ready to Deploy to prod'`,
+        "where": `Release.Name eq ${tpString(name)} and EntityState.Name ne 'Closed' and EntityState.Name ne 'Done' and EntityState.Name ne 'Passed Dev01  QA' and EntityState.Name ne 'Ready to Deploy to prod'`,
         "include": includeFilter,
       }
     }) as T
@@ -622,7 +645,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}'`,
+        "where": `Release.Name eq ${tpString(name)}`,
         "include": includeFilter,
       }
     }) as T
@@ -635,7 +658,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}'`,
+        "where": `Release.Name eq ${tpString(name)}`,
         "include": includeFilter,
       }
     }) as T
@@ -927,7 +950,7 @@ export class TpClient {
 
   async getMyUserStories<T>({ state, take = 25, skip = 0 }: { state?: string, take?: number, skip?: number }): Promise<T> {
     const whereParts = [`AssignedUser.Id eq ${config.tp.ownerId}`]
-    if (state) whereParts.push(`EntityState.Name contains '${state}'`)
+    if (state) whereParts.push(`EntityState.Name contains ${tpString(state)}`)
 
     return this.get<T>({
       pathParam: ["UserStories"],
@@ -944,7 +967,7 @@ export class TpClient {
 
   async getMyBugs<T>({ state, take = 25, skip = 0 }: { state?: string, take?: number, skip?: number }): Promise<T> {
     const whereParts = [`AssignedUser.Id eq ${config.tp.ownerId}`]
-    if (state) whereParts.push(`EntityState.Name contains '${state}'`)
+    if (state) whereParts.push(`EntityState.Name contains ${tpString(state)}`)
 
     return this.get<T>({
       pathParam: ["Bugs"],
@@ -1012,24 +1035,16 @@ export class TpClient {
     })
   }
 
-  async addAttachedFile(generalId: string, source: { filePath: string } | { fileContent: string; fileName: string }): Promise<string | null> {
-    let blob: Blob
-    let fileName: string
-
-    if ("filePath" in source) {
-      blob = new Blob([readFileSync(source.filePath)])
-      fileName = basename(source.filePath)
-    } else {
-      blob = new Blob([Buffer.from(source.fileContent, "base64")])
-      fileName = source.fileName
-    }
+  async addAttachedFile(generalId: string, source: { fileContent: string; fileName: string }): Promise<string | null> {
+    const blob = new Blob([Buffer.from(source.fileContent, "base64")])
+    const fileName = source.fileName
 
     const formData = new FormData()
     formData.append("generalId", generalId)
     formData.append("file", blob, fileName)
 
     const url = `${this.baseUrl}/UploadFile.ashx?access_token=${this.token}`
-    console.error(JSON.stringify({ "UPLOAD_URL": url.replace(this.token, "***") }, null, 2))
+    this.debug("UPLOAD_URL", this.redactUrl(url))
 
     try {
       const response = await fetch(url, {

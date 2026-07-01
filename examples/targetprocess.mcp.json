@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "targetprocess": {
+      "command": "nix",
+      "args": [
+        "run",
+        "path:/path/to/targetprocess-mcp-server"
+      ],
+      "env": {
+        "TP_BASE_URL": "https://your-instance.tpondemand.com",
+        "TP_TOKEN": "<targetprocess-access-token>",
+        "TP_OWNER_ID": "<logged-in-user-id>",
+        "TP_PROJECT_ID": "<project-id>",
+        "TP_TEAM_ID": "<team-id>",
+        "TP_PROCESS_ID": "<process-id>"
+      }
+    }
+  }
+}

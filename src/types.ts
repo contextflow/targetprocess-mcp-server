@@ -13,6 +13,9 @@ export interface Config {
     ownerId: string;
     projectId: string;
     teamId: string;
+    processId: string;
+    userStoryWorkflowId: string;
+    bugWorkflowId: string;
   }
 }
 

@@ -142,6 +142,27 @@ Developer Tools
 ---
 
 ## Installation
+### Nix Flake With Bubblewrap Jail
+
+The flake default app runs the server through [jail.nix](https://git.sr.ht/~alexdavid/jail.nix), which wraps the Node.js process with bubblewrap.
+
+```bash
+TP_BASE_URL=https://your-instance.tpondemand.com \
+TP_TOKEN=<your-tp-token> \
+nix run path:/home/pl/static/software/targetprocess-mcp-server
+```
+
+The generic MCP config template is in `examples/targetprocess.mcp.json`.
+
+To rediscover or change the remaining values, start with `TP_BASE_URL` and `TP_TOKEN`, then use:
+
+- `get_logged_in_user` for `TP_OWNER_ID`
+- `get_projects` for `TP_PROJECT_ID`
+- `get_teams` for `TP_TEAM_ID`
+- `get_processes` for `TP_PROCESS_ID`
+
+`TP_USER_STORY_WORKFLOW_ID` and `TP_BUG_WORKFLOW_ID` are currently loaded for compatibility but are not used by the server.
+
 ### Local Installation for Development
 ```json
 {
