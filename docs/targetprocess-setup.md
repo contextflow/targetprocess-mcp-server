@@ -61,7 +61,7 @@ Start the server with only `TP_BASE_URL` and `TP_TOKEN`, then use these MCP tool
 
 ## Running With Nix
 
-The flake default app is jailed with jail.nix/bubblewrap:
+The flake default app runs in a platform sandbox:
 
 ```bash
 TP_BASE_URL=https://your-instance.tpondemand.com \
@@ -69,9 +69,9 @@ TP_TOKEN=... \
 nix run path:/path/to/targetprocess-mcp-server
 ```
 
-The default jailed runtime forwards `TP_BASE_URL` and `TP_TOKEN` as required values, forwards other `TP_*` values if set, and isolates the Node process with bubblewrap. Node has no direct network access; outbound HTTPS is routed through a host-side tinyproxy allowlist proxy that only permits the exact host from `TP_BASE_URL` on port 443. The jailed process only sees the proxy Unix socket directory, mounted read-only.
+On Linux, the default runtime uses jail.nix/bubblewrap. On macOS, it uses Seatbelt through `/usr/bin/sandbox-exec`. The default runtime forwards `TP_BASE_URL` and `TP_TOKEN` as required values, forwards other `TP_*` values if set, and runs Node without direct network access. Outbound HTTPS is routed through a host-side tinyproxy allowlist proxy that only permits the exact host from `TP_BASE_URL` on port 443. The sandboxed process only sees the private proxy Unix socket directory.
 
-For the jailed runtime, `TP_BASE_URL` must be a simple HTTPS URL with no credentials, query string, fragment, explicit port, whitespace, or unsupported hostname characters.
+For the sandboxed runtime, `TP_BASE_URL` must be a simple HTTPS URL with no credentials, query string, fragment, explicit port, whitespace, or unsupported hostname characters. On macOS, `nix run .#seatbelt` selects the sandboxed runtime explicitly; `nix run .#unjailed` intentionally runs without the OS sandbox and proxy egress restriction.
 
 ## Troubleshooting
 
