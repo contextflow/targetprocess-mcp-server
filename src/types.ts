@@ -37,6 +37,15 @@ export interface UserStoryInputSchema {
   entityStateId?: string
 }
 
+export interface CreateTaskInputSchema {
+  title: string
+  description?: string
+  userStoryId: string
+  projectId?: string
+  teamId?: string
+  entityStateId?: string
+}
+
 // ── TP types ───────────────────────────────────────────────────────────────────────
 export type TpClientParameters = {
   pathParam: string[]

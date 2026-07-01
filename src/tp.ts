@@ -1,4 +1,4 @@
-import { TpClientParameters, TpResponse, TpResult, Relation, BugInputSchema, Bug, Task, LoggedUser } from "./types.js";
+import { TpClientParameters, TpResponse, TpResult, Relation, BugInputSchema, Bug, Task, LoggedUser, CreateTaskInputSchema, CardStatus, TpResponseV2 } from "./types.js";
 import { config } from "./config.js";
 import { ProxyAgent, type Dispatcher } from "undici";
 
@@ -273,19 +273,62 @@ export class TpClient {
   private async post<T, U>(params: TpClientParameters, data: T): Promise<U | null> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
+    this.clearRequestDiagnostic()
     this.debug("TP_POST_URL", this.redactUrl(_url))
     this.debug("TP_POST_BODY", data)
+    if (!this.token) {
+      this.recordRequestDiagnostic({
+        method: "POST",
+        url: _url,
+        message: "TP_TOKEN is required",
+      })
+      console.error("Error making TP request:", "TP_TOKEN is required");
+      console.error("Request URL:", this.redactUrl(_url));
+      return null
+    }
+
     try {
       const response = await this.fetch(_url, {
         method: "POST",
         headers: this.headers,
         body: JSON.stringify(data),
       });
+      const text = await response.text()
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        this.recordRequestDiagnostic({
+          method: "POST",
+          url: _url,
+          message: `HTTP error! status: ${response.status}`,
+          status: response.status,
+          body: text,
+        })
+        const diagnostic = this.getLastRequestDiagnostic()
+        console.error("Error making TP request:", diagnostic?.message);
+        console.error("Request URL:", diagnostic?.url);
+        return null
       }
-      return (await response.json()) as U
+
+      try {
+        return (text ? JSON.parse(text) : null) as U
+      } catch (error) {
+        this.recordRequestDiagnostic({
+          method: "POST",
+          url: _url,
+          message: `Failed to parse Targetprocess JSON response: ${this.errorMessage(error)}`,
+          status: response.status,
+          body: text,
+        })
+        const diagnostic = this.getLastRequestDiagnostic()
+        console.error("Error parsing TP response:", error);
+        console.error("Request URL:", diagnostic?.url);
+        return null
+      }
     } catch (error) {
+      this.recordRequestDiagnostic({
+        method: "POST",
+        url: _url,
+        message: this.errorMessage(error),
+      })
       console.error("Error making TP request:", error);
       return null;
     }
@@ -1064,11 +1107,24 @@ export class TpClient {
     return response
   }
 
-  async createTask<T>({ title, description, userStoryId }: { title: string, description?: string, userStoryId: string }): Promise<T> {
+  async createTask<T>({
+    title,
+    description,
+    userStoryId,
+    projectId,
+    teamId,
+    entityStateId,
+  }: CreateTaskInputSchema): Promise<T> {
+    const cardStatusResponse = await this.getCardStatus<TpResponseV2<CardStatus>>(userStoryId, "UserStory")
+    const cardStatus = cardStatusResponse?.items?.[0]
+    const inheritedProjectId = projectId || String(cardStatus?.project?.id || config.tp.projectId)
+    const inheritedTeamId = teamId
+      || String(cardStatus?.teamState?.team?.id || cardStatus?.teams?.[0]?.id || config.tp.teamId)
+
     const task: Record<string, any> = {
       "Name": title,
       "Project": {
-        "Id": config.tp.projectId
+        "Id": inheritedProjectId
       },
       "UserStory": {
         "Id": userStoryId
@@ -1077,6 +1133,16 @@ export class TpClient {
 
     if (description) {
       task["Description"] = description
+    }
+    if (inheritedTeamId) {
+      task["assignedTeams"] = [{
+        "team": {
+          "id": inheritedTeamId
+        }
+      }]
+    }
+    if (entityStateId) {
+      task["EntityState"] = { "Id": entityStateId }
     }
 
     return this.post<any, T>({

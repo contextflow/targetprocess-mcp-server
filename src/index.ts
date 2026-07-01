@@ -1724,10 +1724,19 @@ server.registerTool(
       description: z.string()
         .optional()
         .describe('Task description (optional)'),
+      projectId: z.string()
+        .optional()
+        .describe('Project ID for the task. Defaults to the linked user story project, then TP_PROJECT_ID.'),
+      teamId: z.string()
+        .optional()
+        .describe('Team ID for the task assignment. Defaults to the linked user story responsible/assigned team, then TP_TEAM_ID.'),
+      entityStateId: z.string()
+        .optional()
+        .describe('Initial task entity state ID (optional; usually omitted so Targetprocess uses the task workflow default).'),
     },
   },
-  async ({ title, userStoryId, description }) =>
-    handleCreateTask(tp, { title, userStoryId, description })
+  async ({ title, userStoryId, description, projectId, teamId, entityStateId }) =>
+    handleCreateTask(tp, { title, userStoryId, description, projectId, teamId, entityStateId })
 )
 
 server.registerTool(

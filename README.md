@@ -50,7 +50,9 @@ User Stories
 
 Tasks
 - `get_in_progress_tasks_and_bugs` — Get all Tasks and Bugs currently in "In Progress" state assigned to a given user (userId)
-- `create_task` — Create a new task linked to a user story (title, userStoryId, optional description)
+- `create_task` — Create a new task linked to a user story (title, userStoryId, optional description/projectId/teamId/entityStateId)
+> [!NOTE]
+> `projectId` and `teamId` are optional — by default they are derived from the linked user story, then fall back to `TP_PROJECT_ID` and `TP_TEAM_ID` from config
 - `list_my_user_stories` — List User Stories assigned to the current user, optionally filtered by state (optional state, optional take, optional skip)
 - `list_my_bugs` — List Bugs assigned to the current user, optionally filtered by state (optional state, optional take, optional skip)
 
