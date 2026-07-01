@@ -36,4 +36,6 @@ TP_TOKEN=... \
 nix run path:/path/to/targetprocess-mcp-server
 ```
 
-The jail forwards `TP_BASE_URL` and `TP_TOKEN` as required values, forwards other `TP_*` values if set, isolates the process with bubblewrap, and grants network access so the server can reach Targetprocess over HTTPS.
+The default jailed runtime forwards `TP_BASE_URL` and `TP_TOKEN` as required values, forwards other `TP_*` values if set, and isolates the Node process with bubblewrap. Node has no direct network access; outbound HTTPS is routed through a host-side tinyproxy allowlist proxy that only permits the exact host from `TP_BASE_URL` on port 443. The jailed process only sees the proxy Unix socket directory, mounted read-only.
+
+For the jailed runtime, `TP_BASE_URL` must be a simple HTTPS URL with no credentials, query string, fragment, explicit port, whitespace, or unsupported hostname characters.

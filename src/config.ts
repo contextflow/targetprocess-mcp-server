@@ -15,6 +15,10 @@ function normalizeTpBaseUrl(rawUrl: string | undefined): string {
     throw new Error("TP_BASE_URL must use https://")
   }
 
+  if (parsed.port && parsed.port !== "443") {
+    throw new Error("TP_BASE_URL must use the default HTTPS port 443")
+  }
+
   return parsed.toString().replace(/\/$/, "")
 }
 
@@ -29,5 +33,6 @@ export const config = {
     processId: process.env.TP_PROCESS_ID?.trim() || "",
     userStoryWorkflowId: process.env.TP_USER_STORY_WORKFLOW_ID?.trim() || "",
     bugWorkflowId: process.env.TP_BUG_WORKFLOW_ID?.trim() || "",
+    proxySocket: process.env.TP_PROXY_SOCKET?.trim() || "",
   }
 }

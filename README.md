@@ -144,13 +144,15 @@ Developer Tools
 ## Installation
 ### Nix Flake With Bubblewrap Jail
 
-The flake default app runs the server through [jail.nix](https://git.sr.ht/~alexdavid/jail.nix), which wraps the Node.js process with bubblewrap.
+The flake default app runs the server through [jail.nix](https://git.sr.ht/~alexdavid/jail.nix), which wraps the Node.js process with bubblewrap. The default jailed runtime does not grant direct network access to Node; it routes HTTPS through a host-side tinyproxy instance that only allows the exact host from `TP_BASE_URL` on port 443. The proxy is exposed to the jail through a private Unix socket directory mounted read-only.
 
 ```bash
 TP_BASE_URL=https://your-instance.tpondemand.com \
 TP_TOKEN=<your-tp-token> \
 nix run path:/home/pl/static/software/targetprocess-mcp-server
 ```
+
+For the jailed runtime, `TP_BASE_URL` must be a simple HTTPS URL with no credentials, query string, fragment, or explicit port. Use `nix run .#unjailed` only when you intentionally want to run without the bubblewrap/tinyproxy egress restriction.
 
 The generic MCP config template is in `examples/targetprocess.mcp.json`.
 

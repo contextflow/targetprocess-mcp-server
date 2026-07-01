@@ -33,13 +33,15 @@ This server authenticates to Targetprocess using a token set via the `TP_TOKEN` 
 
 All sensitive configuration (`TP_TOKEN`, `TP_BASE_URL`, `TP_OWNER_ID`, `TP_PROJECT_ID`, `TP_TEAM_ID`) is loaded from environment variables at startup. Ensure these are managed securely in your deployment environment (e.g., secrets manager, CI/CD secrets, not plain-text config files).
 
-`TP_BASE_URL` must be an `https://` URL.
+`TP_BASE_URL` must be an `https://` URL using the default HTTPS port 443. The jailed Nix launcher also rejects credentials, query strings, fragments, whitespace, explicit ports, and unsupported hostname characters before starting the proxy.
 
 ### Stdio Transport And Nix Jail
 
 The MCP server communicates exclusively over stdio. It does not open any network ports and is not directly reachable over a network, which limits its attack surface to the process that spawns it (typically an MCP client such as Claude Desktop or Claude Code).
 
-The Nix flake default app wraps the server with [jail.nix](https://git.sr.ht/~alexdavid/jail.nix), which uses bubblewrap to isolate the Node.js process. The jail grants network access so the server can reach Targetprocess over HTTPS.
+The Nix flake default app wraps the server with [jail.nix](https://git.sr.ht/~alexdavid/jail.nix), which uses bubblewrap to isolate the Node.js process. The default app starts a local tinyproxy allowlist proxy outside the jail, exposes it to the jailed Node process through a private Unix socket directory mounted read-only, and only allows HTTPS CONNECT to the exact host from `TP_BASE_URL` on port 443. The launcher fails closed if tinyproxy or the socket bridge cannot be started.
+
+The `unjailed` flake app and npm package run as a normal Node process. They still validate outbound Targetprocess URLs in process and reject HTTP redirects, but they do not provide OS-level egress filtering.
 
 ### Input Validation
 

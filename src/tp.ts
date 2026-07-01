@@ -1,16 +1,89 @@
 import { TpClientParameters, TpResponse, TpResult, Relation, BugInputSchema, Bug, Task, LoggedUser } from "./types.js";
 import { config } from "./config.js";
+import { ProxyAgent, type Dispatcher } from "undici";
+
+type TpFetchInit = RequestInit
 
 function tpString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
+}
+
+function normalizedBaseUrl(baseUrl: string): URL {
+  const parsed = new URL(baseUrl)
+  if (parsed.protocol !== "https:") {
+    throw new Error("TP_BASE_URL must use https://")
+  }
+  if (parsed.port && parsed.port !== "443") {
+    throw new Error("TP_BASE_URL must use the default HTTPS port 443")
+  }
+  parsed.pathname = parsed.pathname.replace(/\/$/, "")
+  parsed.search = ""
+  parsed.hash = ""
+  return parsed
+}
+
+function appendPath(url: URL, segments: string[], trailingSlash: boolean): URL {
+  const basePath = url.pathname.replace(/\/$/, "")
+  const encodedSegments = segments
+    .filter((segment) => segment.length > 0)
+    .map((segment) => encodeURIComponent(segment))
+  url.pathname = [basePath, ...encodedSegments].filter(Boolean).join("/") + (trailingSlash ? "/" : "")
+  return url
+}
+
+export function assertTargetprocessUrlAllowed(baseUrl: string, url: URL): void {
+  const base = normalizedBaseUrl(baseUrl)
+  if (url.protocol !== "https:" || url.origin !== base.origin) {
+    throw new Error(`Refusing outbound request to non-Targetprocess origin: ${url.origin}`)
+  }
+}
+
+export function buildTargetprocessUrl(
+  baseUrl: string,
+  pathSegments: string[],
+  query: Record<string, string | number>,
+  options: { trailingSlash?: boolean } = {},
+): string {
+  const url = appendPath(normalizedBaseUrl(baseUrl), pathSegments, options.trailingSlash ?? true)
+  for (const [key, value] of Object.entries(query)) {
+    url.searchParams.set(key, String(value))
+  }
+  assertTargetprocessUrlAllowed(baseUrl, url)
+  return url.toString()
+}
+
+export function buildTpUrl(baseUrl: string, params: TpClientParameters): string {
+  const apiVersionSegments = (params.apiVersion || "/api/v1")
+    .split("/")
+    .filter(Boolean)
+  return buildTargetprocessUrl(baseUrl, [...apiVersionSegments, ...params.pathParam], params.param)
+}
+
+export function createTpDispatcher(proxySocket: string): Dispatcher | undefined {
+  if (!proxySocket) return undefined
+
+  return new ProxyAgent({
+    uri: "http://targetprocess-mcp-proxy",
+    proxyTls: {
+      socketPath: proxySocket,
+    },
+  })
+}
+
+export function buildTpFetchInit(init: TpFetchInit, dispatcher?: Dispatcher): TpFetchInit {
+  return {
+    ...init,
+    redirect: "error",
+    ...(dispatcher ? { dispatcher } : {}),
+  }
 }
 
 export class TpClient {
 
   private baseUrl: string = config.tp.url
   private token: string = config.tp.token
-  private headers: HeadersInit
-  private readonly v1 = '/api/v1'
+  private headers: Record<string, string>
+  private dispatcher: Dispatcher | undefined = createTpDispatcher(config.tp.proxySocket)
   private readonly v2 = '/api/v2'
   private readonly debugHttp = process.env.TP_DEBUG_HTTP === "1"
 
@@ -22,16 +95,7 @@ export class TpClient {
   }
 
   private params(params: TpClientParameters): string {
-    let _url = this.baseUrl + (params.apiVersion || this.v1)
-    for (const segment of params.pathParam) {
-      _url += `/${segment}`
-    }
-
-    let _urlParams = []
-    for (const [key, value] of Object.entries(params.param)) {
-      _urlParams.push(`${key}=${encodeURIComponent(value)}`)
-    }
-    return _url + "/?" + _urlParams.join("&")
+    return buildTpUrl(this.baseUrl, params)
   }
 
   private redactUrl(url: string): string {
@@ -51,6 +115,10 @@ export class TpClient {
     if (this.debugHttp) {
       console.error(JSON.stringify({ [label]: value }))
     }
+  }
+
+  private async fetch(url: string, init: TpFetchInit) {
+    return fetch(url, buildTpFetchInit(init, this.dispatcher))
   }
 
   // @ts-ignore
@@ -76,7 +144,7 @@ export class TpClient {
     params.param["access_token"] = this.token
     let _url = this.params(params)
     try {
-      const response = await fetch(_url, {
+      const response = await this.fetch(_url, {
         method: "GET",
         headers: this.headers
       });
@@ -98,7 +166,7 @@ export class TpClient {
     this.debug("TP_POST_URL", this.redactUrl(_url))
     this.debug("TP_POST_BODY", data)
     try {
-      const response = await fetch(_url, {
+      const response = await this.fetch(_url, {
         method: "POST",
         headers: this.headers,
         body: JSON.stringify(data),
@@ -121,7 +189,7 @@ export class TpClient {
     this.debug("TP_POST_URL", this.redactUrl(_url))
     this.debug("TP_POST_BODY", data)
     try {
-      const response = await fetch(_url, {
+      const response = await this.fetch(_url, {
         method: "POST",
         headers: this.headers,
         body: JSON.stringify(data),
@@ -145,7 +213,7 @@ export class TpClient {
     let _url = this.params(params)
     this.debug("TP_DELETE_URL", this.redactUrl(_url))
     try {
-      const response = await fetch(_url, {
+      const response = await this.fetch(_url, {
         method: "DELETE",
         headers: this.headers,
       });
@@ -1036,18 +1104,18 @@ export class TpClient {
   }
 
   async addAttachedFile(generalId: string, source: { fileContent: string; fileName: string }): Promise<string | null> {
-    const blob = new Blob([Buffer.from(source.fileContent, "base64")])
     const fileName = source.fileName
+    const file = new File([Buffer.from(source.fileContent, "base64")], fileName)
 
     const formData = new FormData()
     formData.append("generalId", generalId)
-    formData.append("file", blob, fileName)
+    formData.append("file", file, fileName)
 
-    const url = `${this.baseUrl}/UploadFile.ashx?access_token=${this.token}`
+    const url = buildTargetprocessUrl(this.baseUrl, ["UploadFile.ashx"], { access_token: this.token }, { trailingSlash: false })
     this.debug("UPLOAD_URL", this.redactUrl(url))
 
     try {
-      const response = await fetch(url, {
+      const response = await this.fetch(url, {
         method: "POST",
         body: formData,
       })

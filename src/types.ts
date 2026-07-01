@@ -16,6 +16,7 @@ export interface Config {
     processId: string;
     userStoryWorkflowId: string;
     bugWorkflowId: string;
+    proxySocket: string;
   }
 }
 
