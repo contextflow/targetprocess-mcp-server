@@ -17,6 +17,7 @@ export interface Config {
     userStoryWorkflowId: string;
     bugWorkflowId: string;
     proxySocket: string;
+    internalCardTypesJson: string;
   }
 }
 
@@ -27,6 +28,28 @@ export interface BugInputSchema {
   projectId?: string,
   teamId?: string,
   entityStateId?: string
+}
+
+export type TpEntityCollection =
+  | "Generals"
+  | "UserStories"
+  | "Bugs"
+  | "Features"
+  | "Epics"
+  | "Requests"
+
+export type TpNativeCardType =
+  | "General"
+  | "UserStory"
+  | "Bug"
+  | "Feature"
+  | "Epic"
+  | "Request"
+
+export interface CustomFieldInput {
+  name: string
+  type: string
+  value?: unknown
 }
 
 export interface UserStoryInputSchema {
@@ -89,6 +112,14 @@ export interface General {
   LinkedTestPlan: any
   Milestone: any
   CustomFields: CustomField[]
+}
+
+export interface Request extends General {
+  EntityState?: EntityState
+  Release?: Release
+  Team?: Team
+  ResponsibleTeam?: ResponsibleTeam
+  Priority?: Priority
 }
 
 export interface Comment {
