@@ -34,5 +34,6 @@ export const config = {
     userStoryWorkflowId: process.env.TP_USER_STORY_WORKFLOW_ID?.trim() || "",
     bugWorkflowId: process.env.TP_BUG_WORKFLOW_ID?.trim() || "",
     proxySocket: process.env.TP_PROXY_SOCKET?.trim() || "",
+    internalCardTypesJson: process.env.TP_INTERNAL_CARD_TYPES_JSON?.trim() || "",
   }
 }

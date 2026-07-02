@@ -41,12 +41,14 @@ import { handleListMyBugs } from "./handlers/list_my_bugs.js";
 import { handleLogTime } from "./handlers/log_time.js";
 import { handleGetMyTimeLogs } from "./handlers/get_my_time_logs.js";
 import { handleGetFeatureUserStories } from "./handlers/get_feature_user_stories.js";
+import { handleGetFeatureContent } from "./handlers/get_feature_content.js";
 import { handleGetUserStoryBugs } from "./handlers/get_user_story_bugs.js";
 import { handleGetCardCurrentStatus } from "./handlers/get_card_current_status.js";
 import { handleUpdateUserStorySubState } from "./handlers/update_user_story_sub_state.js";
 import { handleGetCardRelations } from "./handlers/get_card_relations.js";
 import { handleCreateCardRelation } from "./handlers/create_card_relation.js";
 import { handleDeleteCardRelation } from "./handlers/delete_card_relation.js";
+import { handleCreateInternalCard, handleGetInternalCard, handleGetInternalCardTypes, handleSearchInternalCards } from "./handlers/internal_cards.js";
 
 const server = new McpServer(
   {
@@ -204,20 +206,20 @@ server.registerTool(
 
 server.registerTool('search_tp_cards', {
   title: 'Search TP cards by keyword or phrase in description',
-  description: `Searches TP cards (UserStories or Bugs) by keyword or phrase or partial keyphrase in Card Description e.g. "Text Element", "Font field"
+    description: `Searches TP cards by keyword or phrase or partial keyphrase in Card Description e.g. "Text Element", "Font field"
     NOTE: after results are returned, try analyze and filter results by most relevant to what user is looking for in the description text
     FALLBACK: if no results are found, try spliting phrase by spaces and searching for each word and with "Generals" entity type`,
   inputSchema: {
     keyword: z.string()
       .describe('Keyword or partial name or keyphrase to search for in description'),
-    entityType: z.enum(["UserStories", "Bugs", "Generals"])
+    entityType: z.enum(["UserStories", "Bugs", "Features", "Epics", "Requests", "Generals"])
       .default("UserStories")
       .optional()
-      .describe('Type of TP entity to search — UserStories or Bugs (default: UserStories)'),
+      .describe('Type of TP entity to search — UserStories, Bugs, Features, Epics, Requests, or Generals (default: UserStories)'),
   },
 },
   async ({ keyword, entityType = "UserStories" }) => {
-    const searchEntity = async (text: string, type: "UserStories" | "Bugs" | "Generals") => {
+    const searchEntity = async (text: string, type: TP.TpEntityCollection) => {
       const results = await Promise.all([
         tp.searchContainsNameText<TP.TpResponse<TP.General>>({ text, entityType: type }),
         tp.searchContainsDescriptionText<TP.TpResponse<TP.General>>({ text, entityType: type })
@@ -243,7 +245,7 @@ server.registerTool('search_tp_cards', {
       .filter((term) => term.length >= 3)
 
     if (itemById.size === 0 && terms.length > 1) {
-      const candidateTypes = entityType === "Generals" ? ["Generals"] as const : [entityType, "Generals"] as const
+      const candidateTypes: TP.TpEntityCollection[] = entityType === "Generals" ? ["Generals"] : [entityType, "Generals"]
       const candidates = new Map<number, TP.General>()
 
       for (const term of terms) {
@@ -298,6 +300,111 @@ server.registerTool('search_tp_cards', {
       }],
     };
   }
+)
+
+server.registerTool(
+  'get_internal_card_types',
+  {
+    title: 'Get internal Targetprocess card types',
+    description: 'List the configured internal Targetprocess card kinds and their native Targetprocess entity mappings.',
+  },
+  async () => handleGetInternalCardTypes()
+)
+
+server.registerTool(
+  'search_internal_cards',
+  {
+    title: 'Search internal Targetprocess cards',
+    description: `Search internal card types using organization vocabulary.
+      Supported default kinds: opportunity, pcr, prt, capa, ssr, software_story, bug.
+      Use this when the user mentions Opportunities, PCRs, PRTs, CAPAs, SSRs, software stories, or bugs.`,
+    inputSchema: {
+      keyword: z.string()
+        .describe('Keyword or phrase to search for in title and description'),
+      kind: z.string()
+        .optional()
+        .describe('Internal card kind or alias, e.g. opportunity, PCR, PRT, CAPA, SSR, software story, bug. Omit to search all configured kinds.'),
+      take: z.number()
+        .default(25)
+        .optional()
+        .describe('Maximum results per native entity query, default is 25'),
+    },
+  },
+  async ({ keyword, kind, take }) => handleSearchInternalCards(tp, { keyword, kind, take })
+)
+
+server.registerTool(
+  'get_internal_card',
+  {
+    title: 'Get internal Targetprocess card',
+    description: 'Fetch a card by internal organization kind and normalize its content, state, project, links, and custom fields.',
+    inputSchema: {
+      id: z.string()
+        .min(1)
+        .max(12)
+        .describe('Targetprocess card ID'),
+      kind: z.string()
+        .describe('Internal card kind or alias, e.g. opportunity, PCR, PRT, CAPA, SSR, software story, bug'),
+    },
+  },
+  async ({ id, kind }) => handleGetInternalCard(tp, { id, kind })
+)
+
+server.registerTool(
+  'create_internal_card',
+  {
+    title: 'Create internal Targetprocess card',
+    description: `Create a Targetprocess card using organization vocabulary and structured templates.
+      Supported default kinds:
+      - opportunity maps to Epic
+      - PCR, PRT, and CAPA map to Request
+      - SSR maps to Feature
+      - software_story maps to UserStory
+      - bug maps to Bug
+      For named teams/projects/releases, resolve IDs first with get_teams, get_projects, or release tools.`,
+    inputSchema: {
+      kind: z.string()
+        .describe('Internal card kind or alias, e.g. opportunity, PCR, PRT, CAPA, SSR, software story, bug'),
+      title: z.string()
+        .describe('Card title'),
+      description: z.string()
+        .optional()
+        .describe('Summary or free-form description. The tool stores it as HTML.'),
+      sections: z.record(z.string())
+        .optional()
+        .describe('Template section content keyed by section name from get_internal_card_types, e.g. what, why, how, requirement, actionPlan.'),
+      projectId: z.string()
+        .optional()
+        .describe('Optional Project ID; defaults to TP_PROJECT_ID when the native entity requires a project.'),
+      teamId: z.string()
+        .optional()
+        .describe('Optional Team ID for assignable native entities.'),
+      releaseId: z.string()
+        .optional()
+        .describe('Optional Release ID.'),
+      epicId: z.string()
+        .optional()
+        .describe('Optional Epic ID, used when creating SSR/Feature cards.'),
+      featureId: z.string()
+        .optional()
+        .describe('Optional Feature ID, used when creating software stories.'),
+      entityStateId: z.string()
+        .optional()
+        .describe('Optional Targetprocess EntityState ID.'),
+      origin: z.string()
+        .optional()
+        .describe('Optional bug Origin custom-field value when kind is bug.'),
+      customFields: z.array(z.object({
+        name: z.string(),
+        type: z.string(),
+        value: z.any(),
+      }))
+        .optional()
+        .describe('Optional Targetprocess custom fields for Request cards.'),
+    },
+  },
+  async ({ kind, title, description, sections, projectId, teamId, releaseId, epicId, featureId, entityStateId, origin, customFields }) =>
+    handleCreateInternalCard(tp, { kind, title, description, sections, projectId, teamId, releaseId, epicId, featureId, entityStateId, origin, customFields })
 )
 
 server.registerTool(
@@ -910,6 +1017,21 @@ server.registerTool(
   },
   async ({ title, description, epicId, releaseId, projectId, teamId }) =>
     handleCreateFeature(tp, { title, description, epicId, releaseId, projectId, teamId })
+)
+
+server.registerTool(
+  'get_feature_content',
+  {
+    title: 'Get feature content',
+    description: 'Get a Targetprocess Feature by ID, including its description, state, linked epic, release, and progress.',
+    inputSchema: {
+      id: z.string()
+        .min(1)
+        .max(12)
+        .describe('Feature ID (e.g. 145636)'),
+    },
+  },
+  async ({ id }) => handleGetFeatureContent(tp, id)
 )
 
 server.registerTool(

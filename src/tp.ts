@@ -1,4 +1,4 @@
-import { TpClientParameters, TpResponse, TpResult, Relation, BugInputSchema, Bug, Task, LoggedUser, CreateTaskInputSchema, CardStatus, TpResponseV2 } from "./types.js";
+import { TpClientParameters, TpResponse, TpResult, Relation, BugInputSchema, Bug, Task, LoggedUser, CreateTaskInputSchema, CardStatus, TpResponseV2, CustomFieldInput, TpEntityCollection, TpNativeCardType } from "./types.js";
 import { config } from "./config.js";
 import { ProxyAgent, type Dispatcher } from "undici";
 
@@ -14,6 +14,17 @@ export type TpRequestDiagnostic = {
 
 function tpString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
+}
+
+export function tpNativeTypeCollection(nativeType: TpNativeCardType): TpEntityCollection {
+  switch (nativeType) {
+    case "General": return "Generals"
+    case "UserStory": return "UserStories"
+    case "Bug": return "Bugs"
+    case "Feature": return "Features"
+    case "Epic": return "Epics"
+    case "Request": return "Requests"
+  }
 }
 
 function normalizedBaseUrl(baseUrl: string): URL {
@@ -409,6 +420,20 @@ export class TpClient {
     return response
   }
 
+  async getRequest<T>(requestId: string): Promise<T> {
+    return this.get<T>({
+      pathParam: ["Requests", requestId],
+      param: { "format": "json" },
+    }) as T
+  }
+
+  async getInternalCard<T>(nativeType: TpNativeCardType, cardId: string): Promise<T> {
+    return this.get<T>({
+      pathParam: [tpNativeTypeCollection(nativeType), cardId],
+      param: { "format": "json" },
+    }) as T
+  }
+
   async createBug<T>({ title, card, bugContent, origin = "Manual QA", projectId, teamId }: { title: string, card: { id: string, type: "UserStory" | "Bug" | "Feature" }, bugContent: string, origin?: string, projectId?: string, teamId?: string }): Promise<T> {
     const bug = {
       "Name": title,
@@ -619,6 +644,40 @@ export class TpClient {
     }, feature) as T
   }
 
+  async createRequest<T>({
+    title,
+    description,
+    releaseId,
+    projectId,
+    teamId,
+    entityStateId,
+    customFields,
+  }: {
+    title: string
+    description?: string
+    releaseId?: string
+    projectId?: string
+    teamId?: string
+    entityStateId?: string
+    customFields?: CustomFieldInput[]
+  }): Promise<T> {
+    const request: Record<string, any> = {
+      "Name": title,
+      "Project": { "Id": projectId || config.tp.projectId },
+    }
+
+    if (description) request["Description"] = description
+    if (releaseId) request["Release"] = { "Id": releaseId }
+    if (teamId) request["assignedTeams"] = [{ "team": { "id": teamId } }]
+    if (entityStateId) request["EntityState"] = { "Id": entityStateId }
+    if (customFields && customFields.length > 0) request["customFields"] = customFields
+
+    return this.post<any, T>({
+      pathParam: ["Requests"],
+      param: { "format": "json" },
+    }, request) as T
+  }
+
   async createBugBasedOnUserStory<T>(title: string, userStoryId: string, bugContent: string): Promise<T> {
     const bug = {
       "Name": title,
@@ -786,26 +845,26 @@ export class TpClient {
     return response
   }
 
-  async searchContainsNameText<T>({ text, entityType }: { text: string, entityType: "Generals" | "UserStories" | "Bugs" | "Features" }): Promise<T> {
+  async searchContainsNameText<T>({ text, entityType, take = 25 }: { text: string, entityType: TpEntityCollection, take?: number }): Promise<T> {
     return this.get<T>({
       pathParam: [entityType],
       param: {
         "format": "json",
-        "take": "25",
+        "take": take,
         "where": `Name contains ${tpString(text)}`,
-        "include": "[Name, Description, Id]"
+        "include": "[Name, Description, Id, EntityState[Name], Project[Name], CustomFields]"
       },
     }) as T
   }
 
-  async searchContainsDescriptionText<T>({ text, entityType }: { text: string, entityType: "Generals" | "UserStories" | "Bugs" | "Features" }): Promise<T> {
+  async searchContainsDescriptionText<T>({ text, entityType, take = 50 }: { text: string, entityType: TpEntityCollection, take?: number }): Promise<T> {
     return this.get<T>({
       pathParam: [entityType],
       param: {
         "where": `Description contains ${tpString(text)}`,
         "format": "json",
-        "take": "50",
-        "include": "[Name, Description, Id]",
+        "take": take,
+        "include": "[Name, Description, Id, EntityState[Name], Project[Name], CustomFields]",
       },
     }) as T
   }

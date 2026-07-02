@@ -57,7 +57,11 @@ Tasks
 - `list_my_bugs` — List Bugs assigned to the current user, optionally filtered by state (optional state, optional take, optional skip)
 
 Cards — Read
+- `get_internal_card_types` — List configured internal organization card kinds and their native Targetprocess mappings
+- `search_internal_cards` — Search organization card kinds such as Opportunity, PCR, PRT, CAPA, SSR, software story, or bug (keyword, optional kind, optional take)
+- `get_internal_card` — Fetch a card by internal kind and ID, normalized across native TP entities (id, kind)
 - `get_card_current_status` — Get EntityState, TeamState, and assigned teams for a card (id, optional resourceType: UserStory | Bug | Feature, default: UserStory)
+- `get_feature_content` — Fetch full content of a feature by ID (id)
 - `get_bug_content` — Fetch full content of a bug by ID (id)
 - `get_user_story_content` — Fetch full content of a user story by ID (id)
 - `get_bug_comments` — Get comments on a bug (id, optional results)
@@ -68,6 +72,7 @@ Cards — Read
 - `search_tp_cards` — Search TP cards by keyword or phrase in description (keyword, optional entityType: UserStories | Bugs, default: UserStories)
 
 Cards — Write
+- `create_internal_card` — Create a card using internal organization vocabulary and structured templates (kind, title, optional description/sections/projectId/teamId/releaseId/epicId/featureId/entityStateId/customFields)
 - `add_comment` — Post a comment to any card (id, comment)
 - `add_comment_with_user` — Post a comment to any card and mention a specific user (id, comment, user object from `get_users`)
 - `update_bug` — Update an existing bug (id, optional title, optional bugContent, optional origin, optional projectId, optional teamId, optional entityStateId)
@@ -140,6 +145,28 @@ Developer Tools
   > Format for bug on a user story: `F#<featureId> US#<userStoryId> B#<bugId> <title>`
   > Format for standalone bug: `B#<bugId> <title>`
 
+
+---
+
+## Internal Card Types
+
+The server includes a configurable organization vocabulary layer on top of native Targetprocess entities:
+
+- `opportunity` -> `Epic`
+- `pcr` -> `Request`
+- `prt` -> `Request`
+- `capa` -> `Request`
+- `ssr` -> `Feature`
+- `software_story` -> `UserStory`
+- `bug` -> `Bug`
+
+Use `get_internal_card_types` to inspect the active mapping and template section keys. Override defaults with `TP_INTERNAL_CARD_TYPES_JSON`, for example:
+
+```bash
+TP_INTERNAL_CARD_TYPES_JSON='{"pcr":{"nativeType":"Request","aliases":["change request"]}}'
+```
+
+The override is merged with defaults, so teams can adjust aliases, title prefixes, native type mappings, and template sections without code changes.
 
 ---
 
