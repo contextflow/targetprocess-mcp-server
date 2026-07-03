@@ -48,6 +48,8 @@ import { handleUpdateUserStorySubState } from "./handlers/update_user_story_sub_
 import { handleGetCardRelations } from "./handlers/get_card_relations.js";
 import { handleCreateCardRelation } from "./handlers/create_card_relation.js";
 import { handleDeleteCardRelation } from "./handlers/delete_card_relation.js";
+import { handleAddCardTags } from "./handlers/add_card_tags.js";
+import { handleAddFileAttachment } from "./handlers/add_file_attachment.js";
 import { handleCreateInternalCard, handleGetInternalCard, handleGetInternalCardTypes, handleSearchInternalCards } from "./handlers/internal_cards.js";
 
 const server = new McpServer(
@@ -447,7 +449,7 @@ server.registerTool(
 server.registerTool(
   'add_comment_with_user',
   {
-    title: 'Adds provided content to TP card (user story) as a comment',
+    title: 'Adds provided content to a TP card as a comment',
     description: `Adds provided content as a comment to the specified tp card by id, e.g. 145789 and mentions the user in the comment
     CRITICAL WORKFLOW:
       1) call 'get_users' to get list of available users
@@ -475,27 +477,27 @@ server.registerTool(
   },
   async ({ id, comment, user }) => {
     try {
-      const addCommentResponse = await tp.addCommentWithUser<TP.Comment>(id, comment, (user as TP.LoggedUser));
-      if (!addCommentResponse) {
+      const addCommentResult = await tp.addCommentWithUser<TP.Comment>(id, comment, (user as TP.LoggedUser));
+      if (!addCommentResult.ok) {
         return {
           content: [{
             type: 'text',
-            text: `Failed to add comment to user story id: ${id}`
+            text: `Failed to add comment to card id: ${id}\nHTTP status: ${addCommentResult.status}\nResponse body: ${addCommentResult.body}`
           }]
         };
       }
       return {
         content: [{
           type: 'text',
-          text: JSON.stringify(addCommentResponse)
+          text: JSON.stringify(addCommentResult.data ?? { added: true, cardId: id })
         }],
       };
     } catch (error) {
-      console.error("Error adding comment to user story:", error);
+      console.error("Error adding comment to card:", error);
       return {
         content: [{
           type: 'text',
-          text: `Failed to add comment to user story id: ${id}`
+          text: `Failed to add comment to card id: ${id}`
         }]
       };
     }
@@ -505,7 +507,7 @@ server.registerTool(
 server.registerTool(
   'add_comment',
   {
-    title: 'Adds provided content to TP card (user story) as a comment',
+    title: 'Adds provided content to a TP card as a comment',
     description: `Adds provided content as a comment to the specified tp card by id, e.g. 145789`,
     inputSchema: {
       id: z.string()
@@ -517,6 +519,49 @@ server.registerTool(
     },
   },
   async ({ id, comment }) => handleAddComment(tp, id, comment)
+)
+
+server.registerTool(
+  'add_card_labels',
+  {
+    title: 'Add labels to a TP card',
+    description: 'Adds native Targetprocess labels/tags to any card using the card Tags field. Existing tags are preserved.',
+    inputSchema: {
+      id: z.string()
+        .min(5)
+        .max(6)
+        .describe('TP card id (e.g. 145789)'),
+      labels: z.array(z.string().min(1))
+        .min(1)
+        .describe('Labels/tags to add to the card'),
+      nativeType: z.enum(['General', 'UserStory', 'Bug', 'Feature', 'Epic', 'Request'])
+        .default('General')
+        .optional()
+        .describe('Native Targetprocess type for the card. Use Epic for internal Opportunity cards. Default: General'),
+    },
+  },
+  async ({ id, labels, nativeType }) => handleAddCardTags(tp, { id, labels, nativeType })
+)
+
+server.registerTool(
+  'add_file_attachment',
+  {
+    title: 'Attach a file to a TP card',
+    description: 'Uploads a file attachment to any TP card by id. Provide fileContentBase64 as the raw file bytes encoded in base64.',
+    inputSchema: {
+      id: z.string()
+        .min(5)
+        .max(6)
+        .describe('TP card id (e.g. 145789)'),
+      fileName: z.string()
+        .min(1)
+        .describe('Attachment file name, including extension'),
+      fileContentBase64: z.string()
+        .min(1)
+        .describe('Base64 encoded file content'),
+    },
+  },
+  async ({ id, fileName, fileContentBase64 }) => handleAddFileAttachment(tp, { id, fileName, fileContentBase64 })
 )
 
 server.registerTool(

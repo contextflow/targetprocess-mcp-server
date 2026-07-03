@@ -772,7 +772,7 @@ export class TpClient {
     }) as T
   }
 
-  async addCommentWithUser<T>(userStoryId: string, comment: string, user: LoggedUser): Promise<T> {
+  async addCommentWithUser<T>(cardId: string, comment: string, user: LoggedUser): Promise<TpResult<T | null>> {
     const userAt = user ? `cc - <div>@user:${user.Email}[${user.FirstName} ${user.LastName}]&nbsp;</div>` : ''
     const commentContent = `${comment}\nn${userAt}`
     const commentData = {
@@ -781,31 +781,31 @@ export class TpClient {
         id: config.tp.ownerId
       },
       general: {
-        id: userStoryId,
+        id: cardId,
       },
     }
 
-    return this.post<any, T>({
+    return this.postRaw<any, T | null>({
       pathParam: ["comments"],
       param: { "format": "json" },
-    }, commentData) as T
+    }, commentData)
   }
 
-  async addComment<T>(userStoryId: string, comment: string): Promise<T> {
+  async addComment<T>(cardId: string, comment: string): Promise<TpResult<T | null>> {
     const commentData = {
       description: comment,
       owner: {
         id: config.tp.ownerId
       },
       general: {
-        id: userStoryId,
+        id: cardId,
       },
     }
 
-    return this.post<any, T>({
+    return this.postRaw<any, T | null>({
       pathParam: ["comments"],
       param: { "format": "json" },
-    }, commentData) as T
+    }, commentData)
   }
 
   async addTestStep<T>(testCaseId: string, testStep: { description: string, result: string }): Promise<T> {
@@ -1347,6 +1347,37 @@ export class TpClient {
     return this.del<T>({
       pathParam: ["Relations", relationId],
       param: { "format": "json" },
+    })
+  }
+
+  async addCardTags<T>({
+    cardId,
+    labels,
+    nativeType = "General",
+  }: {
+    cardId: string
+    labels: string[]
+    nativeType?: TpNativeCardType
+  }): Promise<TpResult<T | null>> {
+    const existing = await this.getInternalCard<{ Tags?: string }>(nativeType, cardId)
+    const currentTags = (existing?.Tags || "")
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+
+    const mergedTags = [...currentTags]
+    for (const label of labels.map((tag) => tag.trim()).filter(Boolean)) {
+      if (!mergedTags.some((tag) => tag.toLowerCase() === label.toLowerCase())) {
+        mergedTags.push(label)
+      }
+    }
+
+    return this.postRaw<any, T | null>({
+      pathParam: [tpNativeTypeCollection(nativeType)],
+      param: { "format": "json" },
+    }, {
+      Id: cardId,
+      Tags: mergedTags.join(", "),
     })
   }
 
