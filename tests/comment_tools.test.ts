@@ -17,7 +17,7 @@ beforeEach(() => {
 describe('handleAddComment', () => {
   it('returns comment response on success', async () => {
     const mockComment = { Id: 1, Description: 'Test comment', Owner: { FullName: 'Jane Doe' } }
-    vi.mocked(mockTp.addComment).mockResolvedValue(mockComment as any)
+    vi.mocked(mockTp.addComment).mockResolvedValue({ ok: true, data: mockComment } as any)
 
     const result = await handleAddComment(mockTp, '145789', 'Test comment')
     const parsed = JSON.parse(result.content[0].text)
@@ -25,17 +25,33 @@ describe('handleAddComment', () => {
     expect(parsed.Id).toBe(1)
   })
 
-  it('returns failure message when null', async () => {
-    vi.mocked(mockTp.addComment).mockResolvedValue(null as any)
+  it('returns confirmation when Targetprocess returns an empty successful response', async () => {
+    vi.mocked(mockTp.addComment).mockResolvedValue({ ok: true, data: null } as any)
+
+    const result = await handleAddComment(mockTp, '145789', 'Test comment')
+    const parsed = JSON.parse(result.content[0].text)
+
+    expect(parsed.added).toBe(true)
+    expect(parsed.cardId).toBe('145789')
+  })
+
+  it('surfaces HTTP status and response body on failure', async () => {
+    vi.mocked(mockTp.addComment).mockResolvedValue({
+      ok: false,
+      status: 400,
+      body: '{"Message":"Invalid General"}',
+    } as any)
 
     const result = await handleAddComment(mockTp, '145789', 'Test comment')
 
     expect(result.content[0].text).toContain('Failed to add comment')
+    expect(result.content[0].text).toContain('HTTP status: 400')
+    expect(result.content[0].text).toContain('Invalid General')
     expect(result.content[0].text).toContain('145789')
   })
 
   it('calls addComment with the provided id and comment', async () => {
-    vi.mocked(mockTp.addComment).mockResolvedValue({ Id: 1 } as any)
+    vi.mocked(mockTp.addComment).mockResolvedValue({ ok: true, data: { Id: 1 } } as any)
 
     await handleAddComment(mockTp, '145789', 'my comment')
 

@@ -75,6 +75,8 @@ Cards — Write
 - `create_internal_card` — Create a card using internal organization vocabulary and structured templates (kind, title, optional description/sections/projectId/teamId/releaseId/epicId/featureId/entityStateId/customFields)
 - `add_comment` — Post a comment to any card (id, comment)
 - `add_comment_with_user` — Post a comment to any card and mention a specific user (id, comment, user object from `get_users`)
+- `add_card_labels` — Add native Targetprocess labels/tags to any card through the card `Tags` field (id, labels, optional nativeType)
+- `add_file_attachment` — Upload a file attachment to any card (id, fileName, fileContentBase64)
 - `update_bug` — Update an existing bug (id, optional title, optional bugContent, optional origin, optional projectId, optional teamId, optional entityStateId)
   > Resolve state name → ID via `get_bug_workflows` before passing `entityStateId`
 - `update_user_story` — Update an existing user story (id, optional title, optional description, optional projectId, optional teamId, optional entityStateId)
@@ -267,7 +269,7 @@ npx vitest            # watch mode
 
 ### Coverage
 
-**33 of 46 tools (72%) are covered by unit tests.**
+**35 of 63 tools (56%) are covered by unit tests.**
 
 | Test file | Handlers covered |
 |---|---|
@@ -281,6 +283,7 @@ npx vitest            # watch mode
 | `release_tools.test.ts` | `get_release_user_stories`, `get_release_bugs`, `get_release_features`, `get_release_open_bugs`, `get_release_open_user_stories` |
 | `user_team_tools.test.ts` | `get_users`, `get_teams`, `get_teams_and_team_assignments` |
 | `comment_tools.test.ts` | `add_comment`, `get_user_story_comments`, `get_bug_comments` |
+| `card_metadata_tools.test.ts` | `add_card_labels`, `add_file_attachment` |
 | `creation_tools.test.ts` | `create_bug`, `create_user_story`, `create_feature`, `create_task`, `update_bug`, `update_user_story_state` |
 | `my_work_tools.test.ts` | `get_in_progress_tasks_and_bugs`, `list_my_user_stories`, `list_my_bugs`, `log_time`, `get_my_time_logs` |
 | `entity_tools.test.ts` | `get_feature_user_stories`, `get_user_story_bugs`, `get_card_current_status` |
