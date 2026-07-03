@@ -612,7 +612,19 @@ export class TpClient {
     }) as T
   }
 
-  async createEpic<T>({ title, description, releaseId, projectId }: { title: string, description?: string, releaseId?: string, projectId?: string }): Promise<T | null> {
+  async createEpic<T>({
+    title,
+    description,
+    releaseId,
+    projectId,
+    customFields,
+  }: {
+    title: string
+    description?: string
+    releaseId?: string
+    projectId?: string
+    customFields?: CustomFieldInput[]
+  }): Promise<T | null> {
     const epic: Record<string, any> = {
       "Name": title,
       "Project": { "Id": projectId || config.tp.projectId },
@@ -620,6 +632,7 @@ export class TpClient {
 
     if (description) epic["Description"] = description
     if (releaseId) epic["Release"] = { "Id": releaseId }
+    if (customFields && customFields.length > 0) epic["customFields"] = customFields
 
     return this.post<any, T>({
       pathParam: ["Epics"],
@@ -1346,6 +1359,19 @@ export class TpClient {
   async deleteRelation<T>(relationId: string): Promise<TpResult<T>> {
     return this.del<T>({
       pathParam: ["Relations", relationId],
+      param: { "format": "json" },
+    })
+  }
+
+  async deleteCard<T>({
+    cardId,
+    nativeType,
+  }: {
+    cardId: string
+    nativeType: TpNativeCardType
+  }): Promise<TpResult<T>> {
+    return this.del<T>({
+      pathParam: [tpNativeTypeCollection(nativeType), cardId],
       param: { "format": "json" },
     })
   }

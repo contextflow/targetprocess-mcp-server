@@ -50,7 +50,7 @@ import { handleCreateCardRelation } from "./handlers/create_card_relation.js";
 import { handleDeleteCardRelation } from "./handlers/delete_card_relation.js";
 import { handleAddCardTags } from "./handlers/add_card_tags.js";
 import { handleAddFileAttachment } from "./handlers/add_file_attachment.js";
-import { handleCreateInternalCard, handleGetInternalCard, handleGetInternalCardTypes, handleSearchInternalCards } from "./handlers/internal_cards.js";
+import { handleCreateInternalCard, handleDeleteInternalCard, handleGetInternalCard, handleGetInternalCardTypes, handleSearchInternalCards } from "./handlers/internal_cards.js";
 
 const server = new McpServer(
   {
@@ -402,11 +402,28 @@ server.registerTool(
         value: z.any(),
       }))
         .optional()
-        .describe('Optional Targetprocess custom fields for Request cards.'),
+        .describe('Optional Targetprocess custom fields for cards that support them, including opportunity/Epic and Request cards.'),
     },
   },
   async ({ kind, title, description, sections, projectId, teamId, releaseId, epicId, featureId, entityStateId, origin, customFields }) =>
     handleCreateInternalCard(tp, { kind, title, description, sections, projectId, teamId, releaseId, epicId, featureId, entityStateId, origin, customFields })
+)
+
+server.registerTool(
+  'delete_internal_card',
+  {
+    title: 'Delete internal Targetprocess card',
+    description: 'Delete a Targetprocess card by internal organization kind. Use kind "opportunity" for Opportunity cards stored as native Epics.',
+    inputSchema: {
+      id: z.string()
+        .min(1)
+        .max(12)
+        .describe('Targetprocess card ID'),
+      kind: z.string()
+        .describe('Internal card kind or alias, e.g. opportunity, PCR, PRT, CAPA, SSR, software story, bug'),
+    },
+  },
+  async ({ id, kind }) => handleDeleteInternalCard(tp, { id, kind })
 )
 
 server.registerTool(
