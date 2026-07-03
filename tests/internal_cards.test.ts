@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   handleCreateInternalCard,
+  handleDeleteInternalCard,
   handleGetInternalCard,
   handleGetInternalCardTypes,
   handleSearchInternalCards,
@@ -16,6 +17,7 @@ const mockTp = {
   createUserStory: vi.fn(),
   createBugOnly: vi.fn(),
   createRequest: vi.fn(),
+  deleteCard: vi.fn(),
   getLastRequestDiagnostic: vi.fn(),
 } as unknown as TpClient
 
@@ -100,6 +102,30 @@ describe('handleGetInternalCard', () => {
 })
 
 describe('handleCreateInternalCard', () => {
+  it('creates opportunities as Epics with custom fields', async () => {
+    vi.mocked(mockTp.createEpic).mockResolvedValue({ Id: 67265, Name: 'Support ARM in the product' } as any)
+
+    const customFields = [
+      { name: 'Expected Outcome', type: 'Text', value: 'ARM support is available' },
+      { name: 'ICE', type: 'Number', value: 8 },
+    ]
+
+    const result = await handleCreateInternalCard(mockTp, {
+      kind: 'opportunity',
+      title: 'Support ARM in the product',
+      projectId: '26420',
+      customFields,
+    })
+    const parsed = JSON.parse(result.content[0].text)
+
+    expect(parsed.Id).toBe(67265)
+    expect(mockTp.createEpic).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Support ARM in the product',
+      projectId: '26420',
+      customFields,
+    }))
+  })
+
   it('creates PCRs as Targetprocess Requests with a structured HTML description', async () => {
     vi.mocked(mockTp.createRequest).mockResolvedValue({ Id: 100, Name: 'PCR: Add export' } as any)
 
@@ -140,5 +166,38 @@ describe('handleCreateInternalCard', () => {
     const call = vi.mocked(mockTp.createFeature).mock.calls[0][0] as { description?: string }
     expect(call.description).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
     expect(call.description).not.toContain('<script>alert(1)</script>')
+  })
+})
+
+describe('handleDeleteInternalCard', () => {
+  it('deletes opportunities through the native Epic collection', async () => {
+    vi.mocked(mockTp.deleteCard).mockResolvedValue({
+      ok: true,
+      data: { Id: 67265 },
+    } as any)
+
+    const result = await handleDeleteInternalCard(mockTp, { id: '67265', kind: 'opportunity' })
+    const parsed = JSON.parse(result.content[0].text)
+
+    expect(parsed.deleted).toBe(true)
+    expect(parsed.nativeType).toBe('Epic')
+    expect(mockTp.deleteCard).toHaveBeenCalledWith({
+      cardId: '67265',
+      nativeType: 'Epic',
+    })
+  })
+
+  it('surfaces Targetprocess delete failures', async () => {
+    vi.mocked(mockTp.deleteCard).mockResolvedValue({
+      ok: false,
+      status: 404,
+      body: 'Epic not found',
+    } as any)
+
+    const result = await handleDeleteInternalCard(mockTp, { id: '67265', kind: 'opportunity' })
+
+    expect(result.content[0].text).toContain('Failed to delete Opportunity (Epic) id: 67265')
+    expect(result.content[0].text).toContain('HTTP status: 404')
+    expect(result.content[0].text).toContain('Epic not found')
   })
 })

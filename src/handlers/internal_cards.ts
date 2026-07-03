@@ -129,6 +129,7 @@ export async function handleCreateInternalCard(
         description,
         releaseId: params.releaseId,
         projectId: params.projectId,
+        customFields: params.customFields,
       })
       break
     case 'Feature':
@@ -185,6 +186,37 @@ export async function handleCreateInternalCard(
   }
 
   return textResult(JSON.stringify(response))
+}
+
+export async function handleDeleteInternalCard(
+  tp: TpClient,
+  params: {
+    id: string
+    kind: string
+  },
+): Promise<ToolResult> {
+  const definition = resolveInternalCardType(params.kind)
+  if (!definition) return textResult(`Unknown internal card kind: ${params.kind}`)
+
+  const result = await tp.deleteCard<unknown>({
+    cardId: params.id,
+    nativeType: definition.nativeType,
+  })
+
+  if (!result.ok) {
+    return textResult(
+      `Failed to delete ${definition.label} (${definition.nativeType}) id: ${params.id}\n` +
+      `HTTP status: ${result.status}\n` +
+      `Response body: ${result.body}`,
+    )
+  }
+
+  return textResult(JSON.stringify({
+    deleted: true,
+    id: params.id,
+    kind: definition.kind,
+    nativeType: definition.nativeType,
+  }))
 }
 
 function definitionsForSearch(kind?: string): InternalCardTypeDefinition[] {
