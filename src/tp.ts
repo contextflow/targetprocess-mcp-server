@@ -12,6 +12,18 @@ export type TpRequestDiagnostic = {
   body?: string
 }
 
+export type TpClientOptions = {
+  baseUrl?: string
+  token?: string
+  ownerId?: string
+  projectId?: string
+  teamId?: string
+  processId?: string
+  userStoryWorkflowId?: string
+  bugWorkflowId?: string
+  proxySocket?: string
+}
+
 function tpString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
@@ -99,20 +111,35 @@ export function buildTpFetchInit(init: TpFetchInit, dispatcher?: Dispatcher): Tp
 
 export class TpClient {
 
-  private baseUrl: string = config.tp.url
-  private token: string = config.tp.token
+  private baseUrl: string
+  private token: string
+  private ownerIdConfig: string
+  private projectId: string
+  private teamId: string
+  private processId: string
   private headers: Record<string, string>
-  private dispatcher: Dispatcher | undefined = createTpDispatcher(config.tp.proxySocket)
+  private dispatcher: Dispatcher | undefined
   private loggedInOwnerId: string | undefined
   private lastRequestDiagnostic: TpRequestDiagnostic | undefined
   private readonly v2 = '/api/v2'
   private readonly debugHttp = process.env.TP_DEBUG_HTTP === "1"
 
-  constructor() {
+  constructor(options: TpClientOptions = {}) {
+    this.baseUrl = options.baseUrl ?? config.tp.url
+    this.token = options.token ?? config.tp.token
+    this.ownerIdConfig = options.ownerId ?? config.tp.ownerId
+    this.projectId = options.projectId ?? config.tp.projectId
+    this.teamId = options.teamId ?? config.tp.teamId
+    this.processId = options.processId ?? config.tp.processId
+    this.dispatcher = createTpDispatcher(options.proxySocket ?? config.tp.proxySocket)
     this.headers = {
       "Content-Type": "application/json",
       Accept: "application/json",
     }
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl
   }
 
   private params(params: TpClientParameters): string {
@@ -186,7 +213,7 @@ export class TpClient {
   }
 
   private async ownerId(): Promise<string | null> {
-    if (config.tp.ownerId) return config.tp.ownerId
+    if (this.ownerIdConfig) return this.ownerIdConfig
     if (this.loggedInOwnerId) return this.loggedInOwnerId
 
     const context = await this.getContext<{ LoggedUser?: { Id?: string | number } }>()
@@ -438,7 +465,7 @@ export class TpClient {
     const bug = {
       "Name": title,
       "Project": {
-        "Id": projectId || config.tp.projectId
+        "Id": projectId || this.projectId
       },
       "customFields": [{
         "name": "Origin",
@@ -447,7 +474,7 @@ export class TpClient {
       }],
       "assignedTeams": [{
         "team": {
-          "id": teamId || config.tp.teamId
+          "id": teamId || this.teamId
         }
       }],
       "Description": bugContent,
@@ -524,7 +551,7 @@ export class TpClient {
     if (projectId) bug["Project"] = { "Id": projectId }
     if (teamId) bug["assignedTeams"] = [{
       "team": {
-        "id": teamId || config.tp.teamId
+        "id": teamId || this.teamId
       }
     }]
     if (entityStateId) bug["entityState"] = { "id": entityStateId }
@@ -539,7 +566,7 @@ export class TpClient {
     const bug: Record<string, any> = {
       "Name": title,
       "Project": {
-        "Id": projectId || config.tp.projectId
+        "Id": projectId || this.projectId
       },
       "customFields": [{
         "name": "Origin",
@@ -548,7 +575,7 @@ export class TpClient {
       }],
       "assignedTeams": [{
         "team": {
-          "id": teamId || config.tp.teamId
+          "id": teamId || this.teamId
         }
       }],
       "Description": bugContent,
@@ -565,8 +592,8 @@ export class TpClient {
   async createUserStory<T>({ title, description, featureId, releaseId, projectId, teamId }: { title: string, description?: string, featureId?: string, releaseId?: string, projectId?: string, teamId?: string }): Promise<T> {
     const userStory: Record<string, any> = {
       "Name": title,
-      "Project": { "Id": projectId || config.tp.projectId },
-      "assignedTeams": [{ "team": { "id": teamId || config.tp.teamId } }],
+      "Project": { "Id": projectId || this.projectId },
+      "assignedTeams": [{ "team": { "id": teamId || this.teamId } }],
     }
 
     if (description) userStory["Description"] = description
@@ -627,7 +654,7 @@ export class TpClient {
   }): Promise<T | null> {
     const epic: Record<string, any> = {
       "Name": title,
-      "Project": { "Id": projectId || config.tp.projectId },
+      "Project": { "Id": projectId || this.projectId },
     }
 
     if (description) epic["Description"] = description
@@ -643,8 +670,8 @@ export class TpClient {
   async createFeature<T>({ title, description, epicId, releaseId, projectId, teamId }: { title: string, description?: string, epicId?: string, releaseId?: string, projectId?: string, teamId?: string }): Promise<T> {
     const feature: Record<string, any> = {
       "Name": title,
-      "Project": { "Id": projectId || config.tp.projectId },
-      "assignedTeams": [{ "team": { "id": teamId || config.tp.teamId } }],
+      "Project": { "Id": projectId || this.projectId },
+      "assignedTeams": [{ "team": { "id": teamId || this.teamId } }],
     }
 
     if (description) feature["Description"] = description
@@ -676,7 +703,7 @@ export class TpClient {
   }): Promise<T> {
     const request: Record<string, any> = {
       "Name": title,
-      "Project": { "Id": projectId || config.tp.projectId },
+      "Project": { "Id": projectId || this.projectId },
     }
 
     if (description) request["Description"] = description
@@ -695,7 +722,7 @@ export class TpClient {
     const bug = {
       "Name": title,
       "Project": {
-        "Id": config.tp.projectId
+        "Id": this.projectId
       },
       "UserStory": {
         "Id": userStoryId
@@ -707,7 +734,7 @@ export class TpClient {
       }],
       "assignedTeams": [{
         "team": {
-          "id": config.tp.teamId
+          "id": this.teamId
         }
       }],
       "Description": bugContent,
@@ -722,7 +749,7 @@ export class TpClient {
   async createTestCase<T>(name: string, description: string, testPlanId: string): Promise<T> {
     const testCase = {
       "Name": name,
-      "Project": { "Id": config.tp.projectId },
+      "Project": { "Id": this.projectId },
       "Description": description,
       "TestPlans": [{
         "Id": testPlanId
@@ -739,7 +766,7 @@ export class TpClient {
     const testPlan: Record<string, any> = {
       "Name": `Test Plan: ${title}`,
       "Project": {
-        "Id": config.tp.projectId
+        "Id": this.projectId
       },
       "LinkedGeneral": {
         "ResourceType": "General",
@@ -791,7 +818,7 @@ export class TpClient {
     const commentData = {
       description: commentContent,
       owner: {
-        id: config.tp.ownerId
+        id: this.ownerIdConfig
       },
       general: {
         id: cardId,
@@ -808,7 +835,7 @@ export class TpClient {
     const commentData = {
       description: comment,
       owner: {
-        id: config.tp.ownerId
+        id: this.ownerIdConfig
       },
       general: {
         id: cardId,
@@ -1086,7 +1113,7 @@ export class TpClient {
       param: {
         "format": "json",
         "select": `{Id,Name,Process,EntityType,EntityStates.Select({Id,Name}) as EntityStates}`,
-        "where": `(process.id=${config.tp.processId} and entityType.name="userStory" and parentWorkflow=null)`,
+        "where": `(process.id=${this.processId} and entityType.name="userStory" and parentWorkflow=null)`,
         "take": "1",
       },
       apiVersion: this.v2
@@ -1099,7 +1126,7 @@ export class TpClient {
       param: {
         "format": "json",
         "select": `{id,name,isInitial,isFinal,isDefaultFinal,isPlanned,workflow:{workflow.id,process:{workflow.process.id}},entityType:{entityType.name},subEntityStates:subEntityStates.Select({id,name,entityType:{entityType.name},isInitial,isFinal,isDefaultFinal,isPlanned})}`,
-        "where": `(parentEntityState==null and workflow.process.id in [${config.tp.processId}])`,
+        "where": `(parentEntityState==null and workflow.process.id in [${this.processId}])`,
         "take": "1000",
       },
       apiVersion: this.v2
@@ -1112,7 +1139,7 @@ export class TpClient {
       param: {
         "format": "json",
         "select": `{Id,Name,Process,EntityType,EntityStates.Select({Id,Name}) as EntityStates}`,
-        "where": `(process.id=${config.tp.processId} and entityType.name="bug" and parentWorkflow=null)`,
+        "where": `(process.id=${this.processId} and entityType.name="bug" and parentWorkflow=null)`,
         "take": "1",
       },
       apiVersion: this.v2
@@ -1189,9 +1216,9 @@ export class TpClient {
   }: CreateTaskInputSchema): Promise<T> {
     const cardStatusResponse = await this.getCardStatus<TpResponseV2<CardStatus>>(userStoryId, "UserStory")
     const cardStatus = cardStatusResponse?.items?.[0]
-    const inheritedProjectId = projectId || String(cardStatus?.project?.id || config.tp.projectId)
+    const inheritedProjectId = projectId || String(cardStatus?.project?.id || this.projectId)
     const inheritedTeamId = teamId
-      || String(cardStatus?.teamState?.team?.id || cardStatus?.teams?.[0]?.id || config.tp.teamId)
+      || String(cardStatus?.teamState?.team?.id || cardStatus?.teams?.[0]?.id || this.teamId)
 
     const task: Record<string, any> = {
       "Name": title,
