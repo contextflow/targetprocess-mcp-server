@@ -1,5 +1,4 @@
 import { JSDOM } from 'jsdom'
-import { config } from '../config.js'
 import {
   getInternalCardTypes,
   inferInternalCardKind,
@@ -73,7 +72,8 @@ export async function handleSearchInternalCards(
     }
   }
 
-  const items = [...itemByKey.values()].map(({ card, definition }) => normalizeCard(card, definition))
+  const baseUrl = getClientBaseUrl(tp)
+  const items = [...itemByKey.values()].map(({ card, definition }) => normalizeCard(card, definition, baseUrl))
   if (items.length === 0) {
     return textResult(`No internal cards found for keyword: "${params.keyword}"`)
   }
@@ -96,7 +96,7 @@ export async function handleGetInternalCard(
     return textResult(`Failed to get ${definition.label} (${definition.nativeType}) id: ${params.id}`)
   }
 
-  return textResult(JSON.stringify(normalizeCard(card, definition)))
+  return textResult(JSON.stringify(normalizeCard(card, definition, getClientBaseUrl(tp))))
 }
 
 export async function handleCreateInternalCard(
@@ -236,7 +236,7 @@ function definitionsForSearch(kind?: string): InternalCardTypeDefinition[] {
   return definitions
 }
 
-function normalizeCard(card: MinimalCard, definition: InternalCardTypeDefinition) {
+function normalizeCard(card: MinimalCard, definition: InternalCardTypeDefinition, baseUrl: string) {
   const inferredKind = inferInternalCardKind(definition.nativeType, card) ?? definition.kind
   const id = card.Id
 
@@ -247,7 +247,7 @@ function normalizeCard(card: MinimalCard, definition: InternalCardTypeDefinition
     id,
     name: card.Name,
     description: htmlToText(card.Description || ''),
-    url: id === undefined ? undefined : `${config.tp.url}/entity/${id}`,
+    url: id === undefined || !baseUrl ? undefined : `${baseUrl}/entity/${id}`,
     entityState: card.EntityState?.Name,
     project: card.Project?.Name,
     projectId: card.Project?.Id,
@@ -306,6 +306,10 @@ function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+function getClientBaseUrl(tp: TpClient): string {
+  return typeof tp.getBaseUrl === 'function' ? tp.getBaseUrl() : ''
 }
 
 function textResult(text: string): ToolResult {

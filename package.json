@@ -6,6 +6,7 @@
     "prebuild": "rimraf build dist",
     "build": "tsc",
     "postbuild": "node chmod.js",
+    "start:http": "node build/http.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
