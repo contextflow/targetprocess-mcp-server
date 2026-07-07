@@ -45,6 +45,31 @@ describe('encrypted hosted Targetprocess token store', () => {
     expect(JSON.parse(raw).version).toBe(2)
   })
 
+  it('stores encrypted Frontdoor OpenTokens with renewal metadata', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tp-mcp-token-store-'))
+    const path = join(dir, 'credentials.json')
+    const store = new EncryptedFileCredentialStore(path, Buffer.alloc(32, 8))
+
+    await store.setCredential('tp:113', 'user@example.com', {
+      kind: 'frontdoor_open_token',
+      token: 'open-token',
+      expiresAt: 1_800_000_000_000,
+      renewAfter: 1_700_000_000_000,
+      renewUntil: 1_900_000_000_000,
+    })
+
+    expect(await store.getCredential('tp:113')).toEqual({
+      kind: 'frontdoor_open_token',
+      token: 'open-token',
+      expiresAt: 1_800_000_000_000,
+      renewAfter: 1_700_000_000_000,
+      renewUntil: 1_900_000_000_000,
+    })
+    const raw = await readFile(path, 'utf8')
+    expect(raw).not.toContain('open-token')
+    expect(JSON.parse(raw).users['tp:113'].kind).toBe('frontdoor_open_token')
+  })
+
   it('migrates legacy token-store files when read', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'tp-mcp-token-store-'))
     const path = join(dir, 'legacy.json')

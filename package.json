@@ -7,6 +7,8 @@
     "build": "tsc",
     "postbuild": "node chmod.js",
     "start:http": "node build/http.js",
+    "start:local-oidc": "node examples/local-oidc-provider.mjs",
+    "local:mcp-call": "node examples/local-mcp-call.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

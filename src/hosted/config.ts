@@ -18,6 +18,7 @@ export type OidcMetadata = {
 }
 
 export type HostedConfig = {
+  authProvider: "oidc" | "frontdoor"
   port: number
   publicUrl: string
   mcpPath: string
@@ -32,7 +33,7 @@ export type HostedConfig = {
   tpBaseUrl: string
   frontdoorUrl?: string
   oauthClients: Map<string, OAuthClientConfig>
-  oidc: {
+  oidc?: {
     issuerUrl: string
     clientId: string
     clientSecret: string
@@ -62,11 +63,12 @@ export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Pr
   const mcpPath = env.MCP_PATH?.trim() || "/mcp"
   const mcpUrl = new URL(mcpPath, publicUrl).toString()
   const oauthIssuer = removeTrailingSlash(env.MCP_OAUTH_ISSUER_URL?.trim() || publicUrl)
-  const oidcIssuerUrl = requireUrl(env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL")
-  const oidcMetadata = await discoverOidcMetadata(oidcIssuerUrl, env)
+  const authProvider = parseAuthProvider(env.MCP_AUTH_PROVIDER)
+  const oidc = authProvider === "oidc" ? await loadOidcConfig(publicUrl, env) : undefined
   if (!appConfig.tp.url) throw new Error("TP_BASE_URL is required")
 
-  return {
+  const config = {
+    authProvider,
     port: parsePositiveInteger(env.MCP_PORT, 3000, "MCP_PORT"),
     publicUrl,
     mcpPath,
@@ -81,17 +83,13 @@ export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Pr
     tpBaseUrl: appConfig.tp.url,
     ...optionalUrlValue(env.FRONTDOOR_URL, "FRONTDOOR_URL", "frontdoorUrl"),
     oauthClients: parseOAuthClients(requireEnv(env.MCP_OAUTH_CLIENTS_JSON, "MCP_OAUTH_CLIENTS_JSON")),
-    oidc: {
-      issuerUrl: oidcIssuerUrl,
-      clientId: requireEnv(env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID"),
-      clientSecret: requireEnv(env.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET"),
-      redirectUri: new URL("/oauth/callback", publicUrl).toString(),
-      scopes: csv(env.OIDC_SCOPES || "openid,email,profile"),
-      allowedDomains: csv(env.OIDC_ALLOWED_DOMAINS),
-      allowedGroups: csv(env.OIDC_ALLOWED_GROUPS),
-      metadata: oidcMetadata,
-    },
+    ...(oidc ? { oidc } : {}),
   }
+
+  if (config.authProvider === "frontdoor" && !config.frontdoorUrl) {
+    throw new Error("FRONTDOOR_URL is required when MCP_AUTH_PROVIDER=frontdoor")
+  }
+  return config
 }
 
 export function metadataPathForResource(resource: string): string {
@@ -162,6 +160,29 @@ async function discoverOidcMetadata(issuerUrl: string, env: NodeJS.ProcessEnv): 
     tokenEndpoint: metadata.token_endpoint,
     jwksUri: metadata.jwks_uri,
   }
+}
+
+async function loadOidcConfig(publicUrl: string, env: NodeJS.ProcessEnv): Promise<HostedConfig["oidc"]> {
+  const oidcIssuerUrl = requireUrl(env.OIDC_ISSUER_URL, "OIDC_ISSUER_URL")
+  const oidcMetadata = await discoverOidcMetadata(oidcIssuerUrl, env)
+  return {
+    issuerUrl: oidcIssuerUrl,
+    clientId: requireEnv(env.OIDC_CLIENT_ID, "OIDC_CLIENT_ID"),
+    clientSecret: requireEnv(env.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET"),
+    redirectUri: new URL("/oauth/callback", publicUrl).toString(),
+    scopes: csv(env.OIDC_SCOPES || "openid,email,profile"),
+    allowedDomains: csv(env.OIDC_ALLOWED_DOMAINS),
+    allowedGroups: csv(env.OIDC_ALLOWED_GROUPS),
+    metadata: oidcMetadata,
+  }
+}
+
+function parseAuthProvider(value: string | undefined): HostedConfig["authProvider"] {
+  const provider = value?.trim() || "oidc"
+  if (provider !== "oidc" && provider !== "frontdoor") {
+    throw new Error("MCP_AUTH_PROVIDER must be oidc or frontdoor")
+  }
+  return provider
 }
 
 function requireEnv(value: string | undefined, name: string): string {

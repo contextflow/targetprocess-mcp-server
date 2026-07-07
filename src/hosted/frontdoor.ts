@@ -5,6 +5,8 @@ import type { TargetprocessCredential } from "./token_store.js"
 export type FrontdoorOpenToken = {
   token: string
   expiresAt?: number
+  renewAfter?: number
+  renewUntil?: number
 }
 
 export class FrontdoorAuthError extends Error {
@@ -45,7 +47,53 @@ export class FrontdoorClient {
 
     return {
       token,
-      ...expiresAtFromHeaders(response.headers),
+      ...tokenTimingFromHeaders(response.headers),
+    }
+  }
+
+  async exchangeCode(code: string): Promise<FrontdoorOpenToken> {
+    const url = new URL("/exchangeCode", this.frontdoorUrl).toString()
+    const response = await this.fetchFn(url, buildTpFetchInit({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ code }),
+    }))
+
+    if (!response.ok) {
+      throw new FrontdoorAuthError(`Frontdoor code exchange failed with HTTP ${response.status}`)
+    }
+
+    const token = response.headers.get("apptio-opentoken")
+    if (!token) {
+      throw new FrontdoorAuthError("Frontdoor code exchange did not return apptio-opentoken")
+    }
+
+    return {
+      token,
+      ...tokenTimingFromHeaders(response.headers),
+    }
+  }
+
+  async renewToken(token: string): Promise<FrontdoorOpenToken> {
+    const url = new URL("/service/renewtoken", this.frontdoorUrl).toString()
+    const response = await this.fetchFn(url, buildTpFetchInit({
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "apptio-opentoken": token,
+      },
+    }))
+
+    if (!response.ok) {
+      throw new FrontdoorAuthError(`Frontdoor OpenToken renewal failed with HTTP ${response.status}`)
+    }
+
+    return {
+      token: response.headers.get("apptio-opentoken") || token,
+      ...tokenTimingFromHeaders(response.headers),
     }
   }
 }
@@ -79,10 +127,23 @@ export class FrontdoorOpenTokenCache {
   }
 }
 
-function expiresAtFromHeaders(headers: Headers): { expiresAt?: number } {
-  const raw = headers.get("valid_till") || headers.get("valid-till")
-  const expiresAt = parseValidTill(raw)
-  return expiresAt === undefined ? {} : { expiresAt }
+function tokenTimingFromHeaders(headers: Headers): { expiresAt?: number; renewAfter?: number; renewUntil?: number } {
+  return {
+    ...optionalTimestamp(headers, "valid_till", "valid-till", "expiresAt"),
+    ...optionalTimestamp(headers, "renew_after", "renew-after", "renewAfter"),
+    ...optionalTimestamp(headers, "renew_till", "renew-till", "renewUntil"),
+    ...optionalTimestamp(headers, "renew_until", "renew-until", "renewUntil"),
+  }
+}
+
+function optionalTimestamp<T extends "expiresAt" | "renewAfter" | "renewUntil">(
+  headers: Headers,
+  snakeName: string,
+  kebabName: string,
+  key: T,
+): Record<T, number> | {} {
+  const parsed = parseValidTill(headers.get(snakeName) || headers.get(kebabName))
+  return parsed === undefined ? {} : { [key]: parsed } as Record<T, number>
 }
 
 function parseValidTill(raw: string | null): number | undefined {

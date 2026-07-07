@@ -96,6 +96,7 @@ export class OAuthBroker {
       createdAt: Date.now(),
     })
 
+    if (this.config.authProvider === "frontdoor") return this.frontdoorLoginUrl(state)
     return this.oidcAuthorizationUrl(state, nonce)
   }
 
@@ -108,6 +109,7 @@ export class OAuthBroker {
       nonce,
       createdAt: Date.now(),
     })
+    if (this.config.authProvider === "frontdoor") return this.frontdoorLoginUrl(state)
     return this.oidcAuthorizationUrl(state, nonce)
   }
 
@@ -124,6 +126,24 @@ export class OAuthBroker {
     if (!pending || !oidcCode) throw new OAuthHttpError(400, "invalid_oidc_callback")
 
     const user = await this.exchangeAndVerifyOidcUser(oidcCode, pending.nonce)
+    return this.completePendingLogin(pending, user)
+  }
+
+  completeFrontdoorCallback(requestUrl: URL, user: OAuthUser): { kind: "oauth"; redirectUri: string } | { kind: "account"; sessionToken: string } {
+    this.cleanup()
+    const state = requestUrl.searchParams.get("state") || ""
+    const frontdoorCode = requestUrl.searchParams.get("code") || ""
+    const pending = this.pending.get(state)
+    this.pending.delete(state)
+
+    if (!pending || !frontdoorCode) throw new OAuthHttpError(400, "invalid_frontdoor_callback")
+    return this.completePendingLogin(pending, user)
+  }
+
+  private completePendingLogin(
+    pending: PendingLogin,
+    user: OAuthUser,
+  ): { kind: "oauth"; redirectUri: string } | { kind: "account"; sessionToken: string } {
     if (pending.kind === "account") {
       return {
         kind: "account",
@@ -322,26 +342,38 @@ export class OAuthBroker {
   }
 
   private oidcAuthorizationUrl(state: string, nonce: string): string {
-    const url = new URL(this.config.oidc.metadata.authorizationEndpoint)
+    const oidc = this.requireOidc()
+    const url = new URL(oidc.metadata.authorizationEndpoint)
     url.searchParams.set("response_type", "code")
-    url.searchParams.set("client_id", this.config.oidc.clientId)
-    url.searchParams.set("redirect_uri", this.config.oidc.redirectUri)
-    url.searchParams.set("scope", this.config.oidc.scopes.join(" "))
+    url.searchParams.set("client_id", oidc.clientId)
+    url.searchParams.set("redirect_uri", oidc.redirectUri)
+    url.searchParams.set("scope", oidc.scopes.join(" "))
     url.searchParams.set("state", state)
     url.searchParams.set("nonce", nonce)
     return url.toString()
   }
 
+  private frontdoorLoginUrl(state: string): string {
+    if (!this.config.frontdoorUrl) throw new OAuthHttpError(500, "frontdoor_not_configured")
+    const callbackUrl = new URL("/frontdoor/callback", this.config.publicUrl)
+    callbackUrl.searchParams.set("state", state)
+    const url = new URL("/login", this.config.frontdoorUrl)
+    url.searchParams.set("redirect", callbackUrl.toString())
+    url.searchParams.set("state", state)
+    return url.toString()
+  }
+
   private async exchangeAndVerifyOidcUser(code: string, nonce: string): Promise<OAuthUser> {
+    const oidc = this.requireOidc()
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      redirect_uri: this.config.oidc.redirectUri,
-      client_id: this.config.oidc.clientId,
-      client_secret: this.config.oidc.clientSecret,
+      redirect_uri: oidc.redirectUri,
+      client_id: oidc.clientId,
+      client_secret: oidc.clientSecret,
     })
 
-    const response = await fetch(this.config.oidc.metadata.tokenEndpoint, {
+    const response = await fetch(oidc.metadata.tokenEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -364,6 +396,7 @@ export class OAuthBroker {
   }
 
   private async verifyOidcJwt(token: string, nonce: string): Promise<void> {
+    const oidc = this.requireOidc()
     const header = decodeJwtHeader(token)
     const alg = stringClaim(header.alg, "alg")
     const kid = typeof header.kid === "string" ? header.kid : undefined
@@ -374,8 +407,8 @@ export class OAuthBroker {
     verifyAsymmetricJwtSignature(token, createPublicKey({ key: jwk, format: "jwk" }), alg)
     const claims = decodeJwtClaims(token)
     const now = Math.floor(Date.now() / 1000)
-    if (claims.iss !== this.config.oidc.metadata.issuer) throw new OAuthHttpError(401, "oidc_bad_issuer")
-    if (!audienceMatches(claims.aud, this.config.oidc.clientId)) throw new OAuthHttpError(401, "oidc_bad_audience")
+    if (claims.iss !== oidc.metadata.issuer) throw new OAuthHttpError(401, "oidc_bad_issuer")
+    if (!audienceMatches(claims.aud, oidc.clientId)) throw new OAuthHttpError(401, "oidc_bad_audience")
     if (typeof claims.exp !== "number" || claims.exp <= now) throw new OAuthHttpError(401, "oidc_expired")
     if (claims.nonce !== nonce) throw new OAuthHttpError(401, "oidc_bad_nonce")
     if (claims.email_verified === false) throw new OAuthHttpError(403, "oidc_email_not_verified")
@@ -383,7 +416,7 @@ export class OAuthBroker {
 
   private async getJwks(): Promise<Record<string, unknown>[]> {
     if (this.jwksCache && this.jwksCache.expiresAt > Date.now()) return this.jwksCache.keys
-    const response = await fetch(this.config.oidc.metadata.jwksUri, { redirect: "error" })
+    const response = await fetch(this.requireOidc().metadata.jwksUri, { redirect: "error" })
     if (!response.ok) throw new OAuthHttpError(401, "oidc_jwks_fetch_failed")
     const jwks = await response.json() as { keys?: Record<string, unknown>[] }
     if (!Array.isArray(jwks.keys)) throw new OAuthHttpError(401, "oidc_jwks_invalid")
@@ -392,19 +425,25 @@ export class OAuthBroker {
   }
 
   private assertOrgUser(email: string, claims: Record<string, unknown>): void {
-    if (this.config.oidc.allowedDomains.length > 0) {
+    const oidc = this.requireOidc()
+    if (oidc.allowedDomains.length > 0) {
       const domain = email.split("@")[1] || ""
-      if (!this.config.oidc.allowedDomains.includes(domain)) {
+      if (!oidc.allowedDomains.includes(domain)) {
         throw new OAuthHttpError(403, "org_domain_required")
       }
     }
 
-    if (this.config.oidc.allowedGroups.length > 0) {
+    if (oidc.allowedGroups.length > 0) {
       const groups = new Set([...arrayClaim(claims.groups), ...arrayClaim(claims.roles)])
-      if (!this.config.oidc.allowedGroups.some((group) => groups.has(group))) {
+      if (!oidc.allowedGroups.some((group) => groups.has(group))) {
         throw new OAuthHttpError(403, "org_group_required")
       }
     }
+  }
+
+  private requireOidc(): NonNullable<HostedConfig["oidc"]> {
+    if (!this.config.oidc) throw new OAuthHttpError(500, "oidc_not_configured")
+    return this.config.oidc
   }
 
   private cleanup(): void {

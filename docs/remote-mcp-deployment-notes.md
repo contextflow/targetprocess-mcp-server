@@ -56,11 +56,8 @@ MCP_PUBLIC_URL=https://mcp.example.com
 MCP_SIGNING_KEY_B64=<32 random bytes, base64>
 TP_TOKEN_ENCRYPTION_KEY_B64=<32 random bytes, base64>
 MCP_OAUTH_CLIENTS_JSON='[{"client_id":"claude-org","name":"Claude org connector","redirect_uris":["https://..."],"allowed_origins":["https://claude.ai"]}]'
-OIDC_ISSUER_URL=https://idp.example.com
-OIDC_CLIENT_ID=<oidc-client-id>
-OIDC_CLIENT_SECRET=<oidc-client-secret>
-OIDC_ALLOWED_DOMAINS=example.com
-FRONTDOOR_URL=https://frontdoor.example.com
+MCP_AUTH_PROVIDER=frontdoor
+FRONTDOOR_URL=https://frontdoor-eu.apptio.com
 ```
 
 Optional environment:
@@ -69,10 +66,13 @@ Optional environment:
 - `MCP_PATH`: MCP endpoint path, default `/mcp`.
 - `MCP_RESOURCE`: OAuth resource/audience, default `MCP_PUBLIC_URL + MCP_PATH`.
 - `MCP_ALLOWED_ORIGINS`: comma-separated extra HTTP origins accepted on MCP requests.
+- `MCP_AUTH_PROVIDER`: `frontdoor` for Frontdoor browser login, or `oidc` for the older OIDC + manual credential onboarding flow. Default: `oidc`.
 - `OIDC_ALLOWED_GROUPS`: comma-separated required group names.
 - `TP_TOKEN_STORE_PATH`: encrypted JSON token store path, default `/tmp/targetprocess-mcp-user-tokens.json`.
-- `OIDC_AUTHORIZATION_ENDPOINT`, `OIDC_TOKEN_ENDPOINT`, `OIDC_JWKS_URI`: use these to bypass OIDC discovery.
-- `FRONTDOOR_URL`: enables preferred per-user Frontdoor API-key authentication. If omitted, users can save Targetprocess personal access tokens instead.
+- `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ALLOWED_DOMAINS`, `OIDC_AUTHORIZATION_ENDPOINT`, `OIDC_TOKEN_ENDPOINT`, `OIDC_JWKS_URI`: required only when `MCP_AUTH_PROVIDER=oidc`.
+- `FRONTDOOR_URL`: required when `MCP_AUTH_PROVIDER=frontdoor`; also enables per-user Frontdoor API-key fallback in OIDC mode. Use the API host, for example `https://frontdoor-eu.apptio.com`, not the UI host.
+
+For a local Frontdoor smoke test without a Google SSO secret, use `docs/local-frontdoor-smoke-test.md`.
 
 For production, put `TP_TOKEN_STORE_PATH` on a persistent encrypted volume or replace the credential-store implementation with a managed database/secret store. The current in-repo implementation is a single-instance encrypted file store.
 

@@ -135,7 +135,7 @@ describe('handleCreateInternalCard', () => {
       description: 'Implement export.',
       sections: {
         why: 'Customers need it.',
-        affectedProduct: 'example ADVANCE Chest CT',
+        affectedProduct: 'Example ADVANCE Chest CT',
       },
       projectId: '10',
       customFields: [{ name: 'Type', type: 'DropDown', value: 'Enabler' }],

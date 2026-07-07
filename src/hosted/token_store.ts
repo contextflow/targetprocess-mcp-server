@@ -5,6 +5,7 @@ import { decryptSecret, encryptSecret, type EncryptedValue } from "./security.js
 export type TargetprocessCredential =
   | { kind: "targetprocess_access_token"; token: string }
   | { kind: "frontdoor_api_key"; keyAccess: string; keySecret: string }
+  | { kind: "frontdoor_open_token"; token: string; expiresAt?: number; renewAfter?: number; renewUntil?: number }
 
 export type StoredTargetprocessToken = {
   userId: string
@@ -20,6 +21,9 @@ export type StoredTargetprocessCredential = {
   encryptedToken?: EncryptedValue
   encryptedKeyAccess?: EncryptedValue
   encryptedKeySecret?: EncryptedValue
+  expiresAt?: number
+  renewAfter?: number
+  renewUntil?: number
   updatedAt: string
 }
 
@@ -57,6 +61,16 @@ export class EncryptedFileCredentialStore implements TargetprocessCredentialStor
         token: decryptSecret(entry.encryptedToken, this.encryptionKey),
       }
     }
+    if (entry.kind === "frontdoor_open_token") {
+      if (!entry.encryptedToken) throw new Error("Stored Frontdoor OpenToken is missing encryptedToken")
+      return {
+        kind: "frontdoor_open_token",
+        token: decryptSecret(entry.encryptedToken, this.encryptionKey),
+        expiresAt: entry.expiresAt,
+        renewAfter: entry.renewAfter,
+        renewUntil: entry.renewUntil,
+      }
+    }
     if (!entry.encryptedKeyAccess || !entry.encryptedKeySecret) {
       throw new Error("Stored Frontdoor API key is missing encrypted fields")
     }
@@ -75,16 +89,26 @@ export class EncryptedFileCredentialStore implements TargetprocessCredentialStor
       kind: credential.kind,
       updatedAt: new Date().toISOString(),
     }
-    store.users[userId] = credential.kind === "targetprocess_access_token"
-      ? {
+    if (credential.kind === "targetprocess_access_token") {
+      store.users[userId] = {
           ...base,
           encryptedToken: encryptSecret(credential.token, this.encryptionKey),
         }
-      : {
+    } else if (credential.kind === "frontdoor_open_token") {
+      store.users[userId] = {
+        ...base,
+        encryptedToken: encryptSecret(credential.token, this.encryptionKey),
+        expiresAt: credential.expiresAt,
+        renewAfter: credential.renewAfter,
+        renewUntil: credential.renewUntil,
+      }
+    } else {
+      store.users[userId] = {
           ...base,
           encryptedKeyAccess: encryptSecret(credential.keyAccess, this.encryptionKey),
           encryptedKeySecret: encryptSecret(credential.keySecret, this.encryptionKey),
         }
+    }
     await this.writeStore(store)
   }
 
