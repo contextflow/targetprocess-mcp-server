@@ -4,11 +4,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { JSDOM } from "jsdom";
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 
 import { TpClient } from "./tp.js";
 import * as TP from "./types.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { config } from "./config.js";
 import { handleGetProjects } from "./handlers/get_projects.js";
 import { handleGetUserById } from "./handlers/get_user_by_id.js";
 import { handleGetCurrentReleases } from "./handlers/get_current_releases.js";
@@ -52,6 +52,10 @@ import { handleAddCardTags } from "./handlers/add_card_tags.js";
 import { handleAddFileAttachment } from "./handlers/add_file_attachment.js";
 import { handleCreateInternalCard, handleDeleteInternalCard, handleGetInternalCard, handleGetInternalCardTypes, handleSearchInternalCards } from "./handlers/internal_cards.js";
 
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json");
+
+export function createTargetprocessMcpServer(tp: TpClient = new TpClient()): McpServer {
 const server = new McpServer(
   {
     name: "tp",
@@ -72,8 +76,6 @@ const server = new McpServer(
     }
   }
 )
-
-const tp = new TpClient()
 
 server.registerTool(
   'get_user_story_content',
@@ -291,7 +293,7 @@ server.registerTool('search_tp_cards', {
         title: item.Name,
         id: item.Id,
         description: descriptionText,
-        url: `${config.tp.url}/entity/${item.Id}`,
+        url: `${tp.getBaseUrl()}/entity/${item.Id}`,
       }
     })
 
@@ -2027,9 +2029,6 @@ server.registerTool(
   async ({ take }) => handleGetMyTimeLogs(tp, take)
 )
 
-const require = createRequire(import.meta.url);
-const { version } = require("../package.json");
-
 server.registerTool(
   'get_version',
   {
@@ -2042,13 +2041,19 @@ server.registerTool(
   })
 )
 
+return server
+}
+
 async function main() {
+  const server = createTargetprocessMcpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Targetprocess MCP Server running on stdio");
 }
 
-main().catch((error) => {
-  console.error("Fatal error in main():", error);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error("Fatal error in main():", error);
+    process.exit(1);
+  });
+}

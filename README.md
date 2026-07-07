@@ -198,6 +198,25 @@ To rediscover or change the remaining values, start with `TP_BASE_URL` and `TP_T
 
 `TP_USER_STORY_WORKFLOW_ID` and `TP_BUG_WORKFLOW_ID` are currently loaded for compatibility but are not used by the server.
 
+### Hosted Remote MCP
+
+The hosted server is opt-in and serves MCP Streamable HTTP at `/mcp` by default. It is intended for organization-managed Claude connectors first, with Gemini/Codex compatibility available by registering additional OAuth clients.
+
+```bash
+npm run build
+TP_BASE_URL=https://your-instance.tpondemand.com \
+MCP_PUBLIC_URL=https://mcp.example.com \
+MCP_SIGNING_KEY_B64=<32-byte-base64-key> \
+TP_TOKEN_ENCRYPTION_KEY_B64=<32-byte-base64-key> \
+MCP_OAUTH_CLIENTS_JSON='[{"client_id":"claude-org","name":"Claude org connector","redirect_uris":["https://..."],"allowed_origins":["https://claude.ai"]}]' \
+OIDC_ISSUER_URL=https://idp.example.com \
+OIDC_CLIENT_ID=<oidc-client-id> \
+OIDC_CLIENT_SECRET=<oidc-client-secret> \
+npm run start:http
+```
+
+Users authenticate through the organization OIDC provider and register their own Targetprocess token at `/account/targetprocess`. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
+
 ### Local Installation for Development
 ```json
 {
