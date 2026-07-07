@@ -24,7 +24,7 @@ You can expect an initial response within 5 business days.
 
 The stdio server authenticates to Targetprocess using a token set via the `TP_TOKEN` environment variable. The token is appended as a query parameter on outbound Targetprocess API requests.
 
-The hosted HTTP server does not use a shared Targetprocess token. Each organization user signs in through OIDC and stores their own Targetprocess token through `/account/targetprocess`. Hosted tool calls load that user's encrypted token at request/session setup time.
+The hosted HTTP server does not use a shared Targetprocess token. Each organization user signs in through OIDC and stores their own Targetprocess credential through `/account/targetprocess`. Hosted mode prefers a per-user Frontdoor API key, exchanged server-side for `apptio-opentoken`; Targetprocess personal access tokens remain available as a fallback.
 
 - **Never commit `.env` files** or API tokens to source control.
 - Use `.env.example` as a template; keep actual credentials in `.env` (git-ignored).
@@ -33,7 +33,7 @@ The hosted HTTP server does not use a shared Targetprocess token. Each organizat
 
 ### Environment Variables
 
-All sensitive configuration (`TP_TOKEN`, `TP_BASE_URL`, `TP_OWNER_ID`, `TP_PROJECT_ID`, `TP_TEAM_ID`) is loaded from environment variables at startup for stdio mode. Hosted mode additionally requires OAuth/OIDC secrets and encryption/signing keys such as `OIDC_CLIENT_SECRET`, `MCP_SIGNING_KEY_B64`, and `TP_TOKEN_ENCRYPTION_KEY_B64`. Ensure these are managed securely in your deployment environment (e.g., secrets manager, CI/CD secrets, not plain-text config files).
+All sensitive configuration (`TP_TOKEN`, `TP_BASE_URL`, `TP_OWNER_ID`, `TP_PROJECT_ID`, `TP_TEAM_ID`) is loaded from environment variables at startup for stdio mode. Hosted mode additionally requires OAuth/OIDC secrets and encryption/signing keys such as `OIDC_CLIENT_SECRET`, `MCP_SIGNING_KEY_B64`, and `TP_TOKEN_ENCRYPTION_KEY_B64`; set `FRONTDOOR_URL` to enable preferred Frontdoor OpenToken auth. Ensure these are managed securely in your deployment environment (e.g., secrets manager, CI/CD secrets, not plain-text config files).
 
 `TP_BASE_URL` must be an `https://` URL using the default HTTPS port 443. The jailed Nix launcher also rejects credentials, query strings, fragments, whitespace, explicit ports, and unsupported hostname characters before starting the proxy.
 
@@ -59,7 +59,7 @@ Keep dependencies up to date to pick up security patches. Run `npm audit` period
 
 ## Known Limitations
 
-- The `TP_TOKEN` is passed as a URL query parameter, which may appear in HTTP server access logs on the Targetprocess side. Prefer private or self-hosted Targetprocess instances where log access is controlled.
+- Stdio `TP_TOKEN` and hosted personal access token fallback credentials are passed as URL query parameters, which may appear in HTTP server access logs on the Targetprocess side. Hosted Frontdoor credentials use the `apptio-opentoken` header instead.
 - No outbound request signing or mutual TLS is implemented; the server relies entirely on HTTPS and token-based auth provided by the Targetprocess platform.
 - Hosted mode's built-in encrypted file token store is single-instance storage. Multi-replica deployments should replace it with a shared database or secret-store implementation and use shared OAuth/session state or sticky sessions.
 - Restrict hosted OAuth clients with `MCP_OAUTH_CLIENTS_JSON`; do not treat `User-Agent` or `Origin` as proof that the caller is Claude, Gemini, or Codex.
