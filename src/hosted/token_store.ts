@@ -4,8 +4,6 @@ import { decryptSecret, encryptSecret, type EncryptedValue } from "./security.js
 
 export type TargetprocessCredential =
   | { kind: "targetprocess_access_token"; token: string }
-  | { kind: "frontdoor_api_key"; keyAccess: string; keySecret: string }
-  | { kind: "frontdoor_open_token"; token: string; expiresAt?: number; renewAfter?: number; renewUntil?: number }
 
 export type StoredTargetprocessToken = {
   userId: string
@@ -17,13 +15,8 @@ export type StoredTargetprocessToken = {
 export type StoredTargetprocessCredential = {
   userId: string
   email: string
-  kind: TargetprocessCredential["kind"]
+  kind: string
   encryptedToken?: EncryptedValue
-  encryptedKeyAccess?: EncryptedValue
-  encryptedKeySecret?: EncryptedValue
-  expiresAt?: number
-  renewAfter?: number
-  renewUntil?: number
   updatedAt: string
 }
 
@@ -61,24 +54,7 @@ export class EncryptedFileCredentialStore implements TargetprocessCredentialStor
         token: decryptSecret(entry.encryptedToken, this.encryptionKey),
       }
     }
-    if (entry.kind === "frontdoor_open_token") {
-      if (!entry.encryptedToken) throw new Error("Stored Frontdoor OpenToken is missing encryptedToken")
-      return {
-        kind: "frontdoor_open_token",
-        token: decryptSecret(entry.encryptedToken, this.encryptionKey),
-        expiresAt: entry.expiresAt,
-        renewAfter: entry.renewAfter,
-        renewUntil: entry.renewUntil,
-      }
-    }
-    if (!entry.encryptedKeyAccess || !entry.encryptedKeySecret) {
-      throw new Error("Stored Frontdoor API key is missing encrypted fields")
-    }
-    return {
-      kind: "frontdoor_api_key",
-      keyAccess: decryptSecret(entry.encryptedKeyAccess, this.encryptionKey),
-      keySecret: decryptSecret(entry.encryptedKeySecret, this.encryptionKey),
-    }
+    return null
   }
 
   async setCredential(userId: string, email: string, credential: TargetprocessCredential): Promise<void> {
@@ -89,25 +65,9 @@ export class EncryptedFileCredentialStore implements TargetprocessCredentialStor
       kind: credential.kind,
       updatedAt: new Date().toISOString(),
     }
-    if (credential.kind === "targetprocess_access_token") {
-      store.users[userId] = {
-          ...base,
-          encryptedToken: encryptSecret(credential.token, this.encryptionKey),
-        }
-    } else if (credential.kind === "frontdoor_open_token") {
-      store.users[userId] = {
-        ...base,
-        encryptedToken: encryptSecret(credential.token, this.encryptionKey),
-        expiresAt: credential.expiresAt,
-        renewAfter: credential.renewAfter,
-        renewUntil: credential.renewUntil,
-      }
-    } else {
-      store.users[userId] = {
-          ...base,
-          encryptedKeyAccess: encryptSecret(credential.keyAccess, this.encryptionKey),
-          encryptedKeySecret: encryptSecret(credential.keySecret, this.encryptionKey),
-        }
+    store.users[userId] = {
+      ...base,
+      encryptedToken: encryptSecret(credential.token, this.encryptionKey),
     }
     await this.writeStore(store)
   }

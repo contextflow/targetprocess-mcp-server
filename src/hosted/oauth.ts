@@ -96,7 +96,6 @@ export class OAuthBroker {
       createdAt: Date.now(),
     })
 
-    if (this.config.authProvider === "frontdoor") return this.frontdoorLoginUrl(state)
     return this.oidcAuthorizationUrl(state, nonce)
   }
 
@@ -109,7 +108,6 @@ export class OAuthBroker {
       nonce,
       createdAt: Date.now(),
     })
-    if (this.config.authProvider === "frontdoor") return this.frontdoorLoginUrl(state)
     return this.oidcAuthorizationUrl(state, nonce)
   }
 
@@ -126,17 +124,6 @@ export class OAuthBroker {
     if (!pending || !oidcCode) throw new OAuthHttpError(400, "invalid_oidc_callback")
 
     const user = await this.exchangeAndVerifyOidcUser(oidcCode, pending.nonce)
-    return this.completePendingLogin(pending, user)
-  }
-
-  completeFrontdoorCallback(requestUrl: URL, user: OAuthUser): { kind: "oauth"; redirectUri: string } | { kind: "account"; sessionToken: string } {
-    this.cleanup()
-    const state = requestUrl.searchParams.get("state") || ""
-    const frontdoorCode = requestUrl.searchParams.get("code") || ""
-    const pending = this.pending.get(state)
-    this.pending.delete(state)
-
-    if (!pending || !frontdoorCode) throw new OAuthHttpError(400, "invalid_frontdoor_callback")
     return this.completePendingLogin(pending, user)
   }
 
@@ -353,16 +340,6 @@ export class OAuthBroker {
     return url.toString()
   }
 
-  private frontdoorLoginUrl(state: string): string {
-    if (!this.config.frontdoorUrl) throw new OAuthHttpError(500, "frontdoor_not_configured")
-    const callbackUrl = new URL("/frontdoor/callback", this.config.publicUrl)
-    callbackUrl.searchParams.set("state", state)
-    const url = new URL("/login", this.config.frontdoorUrl)
-    url.searchParams.set("redirect", callbackUrl.toString())
-    url.searchParams.set("state", state)
-    return url.toString()
-  }
-
   private async exchangeAndVerifyOidcUser(code: string, nonce: string): Promise<OAuthUser> {
     const oidc = this.requireOidc()
     const body = new URLSearchParams({
@@ -442,7 +419,6 @@ export class OAuthBroker {
   }
 
   private requireOidc(): NonNullable<HostedConfig["oidc"]> {
-    if (!this.config.oidc) throw new OAuthHttpError(500, "oidc_not_configured")
     return this.config.oidc
   }
 

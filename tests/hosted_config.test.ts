@@ -25,7 +25,6 @@ describe('hosted MCP config', () => {
       OIDC_ISSUER_URL: 'https://idp.example.com',
       OIDC_CLIENT_ID: 'oidc-client',
       OIDC_CLIENT_SECRET: 'oidc-secret',
-      FRONTDOOR_URL: 'https://frontdoor.example.com',
       OIDC_AUTHORIZATION_ENDPOINT: 'https://idp.example.com/authorize',
       OIDC_TOKEN_ENDPOINT: 'https://idp.example.com/token',
       OIDC_JWKS_URI: 'https://idp.example.com/jwks',
@@ -35,7 +34,7 @@ describe('hosted MCP config', () => {
     expect(config.resource).toBe('https://mcp.example.com/mcp')
     expect(config.oauthClients.get('claude-org')?.redirectUris).toEqual(['https://claude.ai/api/mcp/auth/callback'])
     expect(config.oidc.metadata.tokenEndpoint).toBe('https://idp.example.com/token')
-    expect(config.frontdoorUrl).toBe('https://frontdoor.example.com')
+    expect(config.tpPersonalAccessTokensUrl).toBe('https://example.tpondemand.com/RestUI/Board.aspx#page=settings/authAndSecurity/personalAccessTokensTab')
     expect(metadataPathForResource(config.resource)).toBe('/.well-known/oauth-protected-resource/mcp')
   })
 
@@ -56,33 +55,11 @@ describe('hosted MCP config', () => {
     } as NodeJS.ProcessEnv)).rejects.toThrow('MCP_OAUTH_CLIENTS_JSON')
   })
 
-  it('loads Frontdoor upstream auth without OIDC configuration', async () => {
-    vi.stubEnv('TP_BASE_URL', 'https://example.tpondemand.com')
-    const { loadHostedConfig } = await import('../src/hosted/config.js')
-
-    const config = await loadHostedConfig({
-      MCP_AUTH_PROVIDER: 'frontdoor',
-      MCP_PUBLIC_URL: 'https://mcp.example.com',
-      MCP_SIGNING_KEY_B64: key,
-      TP_TOKEN_ENCRYPTION_KEY_B64: key,
-      MCP_OAUTH_CLIENTS_JSON: JSON.stringify([{
-        client_id: 'claude-org',
-        redirect_uris: ['https://claude.ai/api/mcp/auth/callback'],
-      }]),
-      FRONTDOOR_URL: 'https://frontdoor-eu.apptio.com',
-    } as NodeJS.ProcessEnv)
-
-    expect(config.authProvider).toBe('frontdoor')
-    expect(config.frontdoorUrl).toBe('https://frontdoor-eu.apptio.com')
-    expect(config.oidc).toBeUndefined()
-  })
-
-  it('requires Frontdoor URL for Frontdoor upstream auth', async () => {
+  it('requires OIDC configuration for hosted auth', async () => {
     vi.stubEnv('TP_BASE_URL', 'https://example.tpondemand.com')
     const { loadHostedConfig } = await import('../src/hosted/config.js')
 
     await expect(loadHostedConfig({
-      MCP_AUTH_PROVIDER: 'frontdoor',
       MCP_PUBLIC_URL: 'https://mcp.example.com',
       MCP_SIGNING_KEY_B64: key,
       TP_TOKEN_ENCRYPTION_KEY_B64: key,
@@ -90,6 +67,6 @@ describe('hosted MCP config', () => {
         client_id: 'claude-org',
         redirect_uris: ['https://claude.ai/api/mcp/auth/callback'],
       }]),
-    } as NodeJS.ProcessEnv)).rejects.toThrow('FRONTDOOR_URL')
+    } as NodeJS.ProcessEnv)).rejects.toThrow('OIDC_ISSUER_URL')
   })
 })

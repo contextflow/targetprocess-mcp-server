@@ -24,7 +24,7 @@ You can expect an initial response within 5 business days.
 
 The stdio server authenticates to Targetprocess using a token set via the `TP_TOKEN` environment variable. The token is appended as a query parameter on outbound Targetprocess API requests.
 
-The hosted HTTP server does not use a shared Targetprocess token. Each organization user signs in through OIDC and stores their own Targetprocess credential through `/account/targetprocess`. Hosted mode prefers a per-user Frontdoor API key, exchanged server-side for `apptio-opentoken`; Targetprocess personal access tokens remain available as a fallback.
+The hosted HTTP server does not use a shared Targetprocess token. Each organization user signs in through OIDC and stores their own Targetprocess personal access token through `/account/targetprocess`. The token is validated before it is saved, stored encrypted at rest, and never rendered back through the account page.
 
 - **Never commit `.env` files** or API tokens to source control.
 - Use `.env.example` as a template; keep actual credentials in `.env` (git-ignored).
@@ -33,7 +33,7 @@ The hosted HTTP server does not use a shared Targetprocess token. Each organizat
 
 ### Environment Variables
 
-All sensitive configuration (`TP_TOKEN`, `TP_BASE_URL`, `TP_OWNER_ID`, `TP_PROJECT_ID`, `TP_TEAM_ID`) is loaded from environment variables at startup for stdio mode. Hosted mode additionally requires OAuth/OIDC secrets and encryption/signing keys such as `OIDC_CLIENT_SECRET`, `MCP_SIGNING_KEY_B64`, and `TP_TOKEN_ENCRYPTION_KEY_B64`; set `FRONTDOOR_URL` to enable preferred Frontdoor OpenToken auth. Ensure these are managed securely in your deployment environment (e.g., secrets manager, CI/CD secrets, not plain-text config files).
+All sensitive configuration (`TP_TOKEN`, `TP_BASE_URL`, `TP_OWNER_ID`, `TP_PROJECT_ID`, `TP_TEAM_ID`) is loaded from environment variables at startup for stdio mode. Hosted mode additionally requires OAuth/OIDC secrets and encryption/signing keys such as `OIDC_CLIENT_SECRET`, `MCP_SIGNING_KEY_B64`, and `TP_TOKEN_ENCRYPTION_KEY_B64`. Ensure these are managed securely in your deployment environment (e.g., secrets manager, CI/CD secrets, not plain-text config files).
 
 `TP_BASE_URL` must be an `https://` URL using the default HTTPS port 443. The jailed Nix launcher also rejects credentials, query strings, fragments, whitespace, explicit ports, and unsupported hostname characters before starting the proxy.
 

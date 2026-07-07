@@ -18,7 +18,6 @@ export type OidcMetadata = {
 }
 
 export type HostedConfig = {
-  authProvider: "oidc" | "frontdoor"
   port: number
   publicUrl: string
   mcpPath: string
@@ -31,9 +30,9 @@ export type HostedConfig = {
   tokenEncryptionKey: Buffer
   tokenStorePath: string
   tpBaseUrl: string
-  frontdoorUrl?: string
+  tpPersonalAccessTokensUrl: string
   oauthClients: Map<string, OAuthClientConfig>
-  oidc?: {
+  oidc: {
     issuerUrl: string
     clientId: string
     clientSecret: string
@@ -63,12 +62,11 @@ export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Pr
   const mcpPath = env.MCP_PATH?.trim() || "/mcp"
   const mcpUrl = new URL(mcpPath, publicUrl).toString()
   const oauthIssuer = removeTrailingSlash(env.MCP_OAUTH_ISSUER_URL?.trim() || publicUrl)
-  const authProvider = parseAuthProvider(env.MCP_AUTH_PROVIDER)
-  const oidc = authProvider === "oidc" ? await loadOidcConfig(publicUrl, env) : undefined
+  const oidc = await loadOidcConfig(publicUrl, env)
   if (!appConfig.tp.url) throw new Error("TP_BASE_URL is required")
+  const tpBaseUrl = appConfig.tp.url
 
-  const config = {
-    authProvider,
+  return {
     port: parsePositiveInteger(env.MCP_PORT, 3000, "MCP_PORT"),
     publicUrl,
     mcpPath,
@@ -80,16 +78,11 @@ export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Pr
     signingKey: parseBase64Key(requireEnv(env.MCP_SIGNING_KEY_B64, "MCP_SIGNING_KEY_B64"), 32, "MCP_SIGNING_KEY_B64"),
     tokenEncryptionKey: parseBase64Key(requireEnv(env.TP_TOKEN_ENCRYPTION_KEY_B64, "TP_TOKEN_ENCRYPTION_KEY_B64"), 32, "TP_TOKEN_ENCRYPTION_KEY_B64"),
     tokenStorePath: env.TP_TOKEN_STORE_PATH?.trim() || "/tmp/targetprocess-mcp-user-tokens.json",
-    tpBaseUrl: appConfig.tp.url,
-    ...optionalUrlValue(env.FRONTDOOR_URL, "FRONTDOOR_URL", "frontdoorUrl"),
+    tpBaseUrl,
+    tpPersonalAccessTokensUrl: personalAccessTokensUrl(tpBaseUrl),
     oauthClients: parseOAuthClients(requireEnv(env.MCP_OAUTH_CLIENTS_JSON, "MCP_OAUTH_CLIENTS_JSON")),
-    ...(oidc ? { oidc } : {}),
+    oidc,
   }
-
-  if (config.authProvider === "frontdoor" && !config.frontdoorUrl) {
-    throw new Error("FRONTDOOR_URL is required when MCP_AUTH_PROVIDER=frontdoor")
-  }
-  return config
 }
 
 export function metadataPathForResource(resource: string): string {
@@ -177,14 +170,6 @@ async function loadOidcConfig(publicUrl: string, env: NodeJS.ProcessEnv): Promis
   }
 }
 
-function parseAuthProvider(value: string | undefined): HostedConfig["authProvider"] {
-  const provider = value?.trim() || "oidc"
-  if (provider !== "oidc" && provider !== "frontdoor") {
-    throw new Error("MCP_AUTH_PROVIDER must be oidc or frontdoor")
-  }
-  return provider
-}
-
 function requireEnv(value: string | undefined, name: string): string {
   const trimmed = value?.trim()
   if (!trimmed) throw new Error(`${name} is required`)
@@ -194,11 +179,6 @@ function requireEnv(value: string | undefined, name: string): string {
 function requireUrl(value: string | undefined, name: string): string {
   const trimmed = requireEnv(value, name)
   return parseHostedUrl(trimmed, name)
-}
-
-function optionalUrlValue<T extends string>(value: string | undefined, name: string, key: T): Record<T, string> | {} {
-  const trimmed = value?.trim()
-  return trimmed ? { [key]: parseHostedUrl(trimmed, name) } as Record<T, string> : {}
 }
 
 function parseHostedUrl(value: string, name: string): string {
@@ -225,4 +205,10 @@ function parsePositiveInteger(value: string | undefined, fallback: number, name:
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`)
   return parsed
+}
+
+function personalAccessTokensUrl(tpBaseUrl: string): string {
+  const url = new URL("/RestUI/Board.aspx", tpBaseUrl)
+  url.hash = "page=settings/authAndSecurity/personalAccessTokensTab"
+  return url.toString()
 }
