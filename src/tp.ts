@@ -12,8 +12,13 @@ export type TpRequestDiagnostic = {
   body?: string
 }
 
+export type TargetprocessAuth =
+  | { kind: "accessToken"; token: string }
+  | { kind: "apptioOpenToken"; token: string }
+
 export type TpClientOptions = {
   baseUrl?: string
+  auth?: TargetprocessAuth
   token?: string
   ownerId?: string
   projectId?: string
@@ -112,7 +117,7 @@ export function buildTpFetchInit(init: TpFetchInit, dispatcher?: Dispatcher): Tp
 export class TpClient {
 
   private baseUrl: string
-  private token: string
+  private auth: TargetprocessAuth
   private ownerIdConfig: string
   private projectId: string
   private teamId: string
@@ -126,7 +131,7 @@ export class TpClient {
 
   constructor(options: TpClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? config.tp.url
-    this.token = options.token ?? config.tp.token
+    this.auth = options.auth ?? { kind: "accessToken", token: options.token ?? config.tp.token }
     this.ownerIdConfig = options.ownerId ?? config.tp.ownerId
     this.projectId = options.projectId ?? config.tp.projectId
     this.teamId = options.teamId ?? config.tp.teamId
@@ -146,6 +151,33 @@ export class TpClient {
     return buildTpUrl(this.baseUrl, params)
   }
 
+  private authToken(): string {
+    return this.auth.token
+  }
+
+  private withAuthParams(params: TpClientParameters): TpClientParameters {
+    if (this.auth.kind !== "accessToken") return { ...params, param: { ...params.param } }
+    return {
+      ...params,
+      param: {
+        ...params.param,
+        access_token: this.auth.token,
+      },
+    }
+  }
+
+  private withAuthHeaders(headers: Record<string, string> = this.headers): Record<string, string> {
+    if (this.auth.kind !== "apptioOpenToken") return headers
+    return {
+      ...headers,
+      "apptio-opentoken": this.auth.token,
+    }
+  }
+
+  private missingAuthMessage(): string {
+    return this.auth.kind === "accessToken" ? "TP_TOKEN is required" : "Targetprocess OpenToken is required"
+  }
+
   private redactUrl(url: string): string {
     try {
       const parsed = new URL(url)
@@ -155,7 +187,8 @@ export class TpClient {
       return parsed.toString()
     } catch {
       const redacted = url.replace(/access_token=[^&\s]*/g, "access_token=***")
-      return this.token ? redacted.replaceAll(this.token, "***") : redacted
+      const token = this.authToken()
+      return token ? redacted.replaceAll(token, "***") : redacted
     }
   }
 
@@ -187,7 +220,8 @@ export class TpClient {
 
   private redactText(text: string): string {
     const withoutQueryToken = text.replace(/access_token=[^&\s"]*/g, "access_token=***")
-    return this.token ? withoutQueryToken.replaceAll(this.token, "***") : withoutQueryToken
+    const token = this.authToken()
+    return token ? withoutQueryToken.replaceAll(token, "***") : withoutQueryToken
   }
 
   private recordRequestDiagnostic({
@@ -247,16 +281,16 @@ export class TpClient {
   }
 
   private async get<T>(params: TpClientParameters): Promise<T | null> {
-    params.param["access_token"] = this.token
-    let _url = this.params(params)
+    let _url = this.params(this.withAuthParams(params))
     this.clearRequestDiagnostic()
-    if (!this.token) {
+    if (!this.authToken()) {
+      const message = this.missingAuthMessage()
       this.recordRequestDiagnostic({
         method: "GET",
         url: _url,
-        message: "TP_TOKEN is required",
+        message,
       })
-      console.error("Error making TP request:", "TP_TOKEN is required");
+      console.error("Error making TP request:", message);
       console.error("Request URL:", this.redactUrl(_url));
       return null
     }
@@ -264,7 +298,7 @@ export class TpClient {
     try {
       const response = await this.fetch(_url, {
         method: "GET",
-        headers: this.headers
+        headers: this.withAuthHeaders(),
       });
       const text = await response.text()
       if (!response.ok) {
@@ -309,18 +343,18 @@ export class TpClient {
   }
 
   private async post<T, U>(params: TpClientParameters, data: T): Promise<U | null> {
-    params.param["access_token"] = this.token
-    let _url = this.params(params)
+    let _url = this.params(this.withAuthParams(params))
     this.clearRequestDiagnostic()
     this.debug("TP_POST_URL", this.redactUrl(_url))
     this.debug("TP_POST_BODY", data)
-    if (!this.token) {
+    if (!this.authToken()) {
+      const message = this.missingAuthMessage()
       this.recordRequestDiagnostic({
         method: "POST",
         url: _url,
-        message: "TP_TOKEN is required",
+        message,
       })
-      console.error("Error making TP request:", "TP_TOKEN is required");
+      console.error("Error making TP request:", message);
       console.error("Request URL:", this.redactUrl(_url));
       return null
     }
@@ -328,7 +362,7 @@ export class TpClient {
     try {
       const response = await this.fetch(_url, {
         method: "POST",
-        headers: this.headers,
+        headers: this.withAuthHeaders(),
         body: JSON.stringify(data),
       });
       const text = await response.text()
@@ -375,14 +409,16 @@ export class TpClient {
   // Like post(), but on failure returns the HTTP status and raw response body
   // instead of null, so callers can surface TP's error detail to the user.
   private async postRaw<T, U>(params: TpClientParameters, data: T): Promise<TpResult<U>> {
-    params.param["access_token"] = this.token
-    let _url = this.params(params)
+    let _url = this.params(this.withAuthParams(params))
     this.debug("TP_POST_URL", this.redactUrl(_url))
     this.debug("TP_POST_BODY", data)
+    if (!this.authToken()) {
+      return { ok: false, status: 0, body: this.missingAuthMessage() }
+    }
     try {
       const response = await this.fetch(_url, {
         method: "POST",
-        headers: this.headers,
+        headers: this.withAuthHeaders(),
         body: JSON.stringify(data),
       });
       const text = await response.text()
@@ -400,13 +436,15 @@ export class TpClient {
   // DELETE request that, like postRaw(), surfaces the HTTP status and raw
   // response body on failure so callers can report TP's error detail.
   private async del<U>(params: TpClientParameters): Promise<TpResult<U>> {
-    params.param["access_token"] = this.token
-    let _url = this.params(params)
+    let _url = this.params(this.withAuthParams(params))
     this.debug("TP_DELETE_URL", this.redactUrl(_url))
+    if (!this.authToken()) {
+      return { ok: false, status: 0, body: this.missingAuthMessage() }
+    }
     try {
       const response = await this.fetch(_url, {
         method: "DELETE",
-        headers: this.headers,
+        headers: this.withAuthHeaders(),
       });
       const text = await response.text()
       if (!response.ok) {
@@ -1442,12 +1480,14 @@ export class TpClient {
     formData.append("generalId", generalId)
     formData.append("file", file, fileName)
 
-    const url = buildTargetprocessUrl(this.baseUrl, ["UploadFile.ashx"], { access_token: this.token }, { trailingSlash: false })
+    const query: Record<string, string> = this.auth.kind === "accessToken" ? { access_token: this.auth.token } : {}
+    const url = buildTargetprocessUrl(this.baseUrl, ["UploadFile.ashx"], query, { trailingSlash: false })
     this.debug("UPLOAD_URL", this.redactUrl(url))
 
     try {
       const response = await this.fetch(url, {
         method: "POST",
+        headers: this.withAuthHeaders({}),
         body: formData,
       })
       if (!response.ok) {

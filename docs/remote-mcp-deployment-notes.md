@@ -21,14 +21,17 @@ Goal: deploy one shared Targetprocess MCP service so users can connect from Clau
 
 3. Let each user authenticate with their own credentials.
    - The hosted service acts as an OAuth authorization server for the MCP resource and delegates user sign-in to the organization OIDC provider.
-   - Users register their own Targetprocess token at `/account/targetprocess` after OIDC sign-in.
-   - Stored Targetprocess tokens are encrypted at rest with `TP_TOKEN_ENCRYPTION_KEY_B64`.
+   - Users register their own Frontdoor API key at `/account/targetprocess` after OIDC sign-in when `FRONTDOOR_URL` is configured.
+   - The service exchanges Frontdoor API keys for `apptio-opentoken` and calls Targetprocess with that header.
+   - Targetprocess personal access tokens remain available as a fallback if Frontdoor is not configured.
+   - Stored Targetprocess credentials are encrypted at rest with `TP_TOKEN_ENCRYPTION_KEY_B64`.
 
 4. Resolve credentials per request.
    - Claude calls the shared MCP endpoint.
    - The service validates the MCP bearer token on every HTTP request.
-   - The service loads that user’s stored Targetprocess token.
-   - The Targetprocess MCP tools run with that user’s token.
+   - The service loads that user’s stored Targetprocess credential.
+   - Frontdoor API key credentials are exchanged for a cached `apptio-opentoken`.
+   - The Targetprocess MCP tools run with that user’s Targetprocess permissions.
    - Results are returned to Claude.
 
 5. Publish the connector.
@@ -57,6 +60,7 @@ OIDC_ISSUER_URL=https://idp.example.com
 OIDC_CLIENT_ID=<oidc-client-id>
 OIDC_CLIENT_SECRET=<oidc-client-secret>
 OIDC_ALLOWED_DOMAINS=example.com
+FRONTDOOR_URL=https://frontdoor.example.com
 ```
 
 Optional environment:
@@ -68,16 +72,17 @@ Optional environment:
 - `OIDC_ALLOWED_GROUPS`: comma-separated required group names.
 - `TP_TOKEN_STORE_PATH`: encrypted JSON token store path, default `/tmp/targetprocess-mcp-user-tokens.json`.
 - `OIDC_AUTHORIZATION_ENDPOINT`, `OIDC_TOKEN_ENDPOINT`, `OIDC_JWKS_URI`: use these to bypass OIDC discovery.
+- `FRONTDOOR_URL`: enables preferred per-user Frontdoor API-key authentication. If omitted, users can save Targetprocess personal access tokens instead.
 
-For production, put `TP_TOKEN_STORE_PATH` on a persistent encrypted volume or replace the `TargetprocessTokenStore` implementation with a managed database/secret store. The current in-repo implementation is a single-instance encrypted file store.
+For production, put `TP_TOKEN_STORE_PATH` on a persistent encrypted volume or replace the credential-store implementation with a managed database/secret store. The current in-repo implementation is a single-instance encrypted file store.
 
 ## Security Baseline
 
 - Require HTTPS.
 - Require authentication on every MCP request.
 - Validate HTTP `Origin` headers.
-- Encrypt stored user tokens.
-- Never log tokens or raw authorization headers.
+- Encrypt stored user credentials.
+- Never log tokens, API keys, or raw authorization headers.
 - Restrict outbound network access to the Targetprocess host.
 - Add audit logs for user, tool name, target entity ID, timestamp, and success/failure.
 - Consider role-gating destructive tools such as delete operations.
@@ -89,7 +94,7 @@ For production, put `TP_TOKEN_STORE_PATH` on a persistent encrypted volume or re
 1. Done: Targetprocess token/base URL can be request scoped.
 2. Done: Streamable HTTP MCP endpoint at `/mcp`.
 3. Done: OAuth/OIDC broker with registered MCP client allowlist.
-4. Done: encrypted per-user Targetprocess token onboarding.
+4. Done: encrypted per-user Frontdoor API key and Targetprocess token onboarding.
 5. Partial: token redaction is preserved; structured audit logging is still a follow-up.
 6. Deploy behind the normal HTTPS ingress/reverse proxy.
 7. Register the hosted MCP URL in Claude or provide it to users as the single connector URL.

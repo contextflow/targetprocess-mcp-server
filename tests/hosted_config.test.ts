@@ -25,6 +25,7 @@ describe('hosted MCP config', () => {
       OIDC_ISSUER_URL: 'https://idp.example.com',
       OIDC_CLIENT_ID: 'oidc-client',
       OIDC_CLIENT_SECRET: 'oidc-secret',
+      FRONTDOOR_URL: 'https://frontdoor.example.com',
       OIDC_AUTHORIZATION_ENDPOINT: 'https://idp.example.com/authorize',
       OIDC_TOKEN_ENDPOINT: 'https://idp.example.com/token',
       OIDC_JWKS_URI: 'https://idp.example.com/jwks',
@@ -34,6 +35,7 @@ describe('hosted MCP config', () => {
     expect(config.resource).toBe('https://mcp.example.com/mcp')
     expect(config.oauthClients.get('claude-org')?.redirectUris).toEqual(['https://claude.ai/api/mcp/auth/callback'])
     expect(config.oidc.metadata.tokenEndpoint).toBe('https://idp.example.com/token')
+    expect(config.frontdoorUrl).toBe('https://frontdoor.example.com')
     expect(metadataPathForResource(config.resource)).toBe('/.well-known/oauth-protected-resource/mcp')
   })
 

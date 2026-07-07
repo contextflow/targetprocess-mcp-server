@@ -30,6 +30,7 @@ export type HostedConfig = {
   tokenEncryptionKey: Buffer
   tokenStorePath: string
   tpBaseUrl: string
+  frontdoorUrl?: string
   oauthClients: Map<string, OAuthClientConfig>
   oidc: {
     issuerUrl: string
@@ -78,6 +79,7 @@ export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Pr
     tokenEncryptionKey: parseBase64Key(requireEnv(env.TP_TOKEN_ENCRYPTION_KEY_B64, "TP_TOKEN_ENCRYPTION_KEY_B64"), 32, "TP_TOKEN_ENCRYPTION_KEY_B64"),
     tokenStorePath: env.TP_TOKEN_STORE_PATH?.trim() || "/tmp/targetprocess-mcp-user-tokens.json",
     tpBaseUrl: appConfig.tp.url,
+    ...optionalUrlValue(env.FRONTDOOR_URL, "FRONTDOOR_URL", "frontdoorUrl"),
     oauthClients: parseOAuthClients(requireEnv(env.MCP_OAUTH_CLIENTS_JSON, "MCP_OAUTH_CLIENTS_JSON")),
     oidc: {
       issuerUrl: oidcIssuerUrl,
@@ -170,7 +172,16 @@ function requireEnv(value: string | undefined, name: string): string {
 
 function requireUrl(value: string | undefined, name: string): string {
   const trimmed = requireEnv(value, name)
-  const parsed = new URL(trimmed)
+  return parseHostedUrl(trimmed, name)
+}
+
+function optionalUrlValue<T extends string>(value: string | undefined, name: string, key: T): Record<T, string> | {} {
+  const trimmed = value?.trim()
+  return trimmed ? { [key]: parseHostedUrl(trimmed, name) } as Record<T, string> : {}
+}
+
+function parseHostedUrl(value: string, name: string): string {
+  const parsed = new URL(value)
   if (parsed.protocol !== "https:" && parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
     throw new Error(`${name} must use https:// in production`)
   }

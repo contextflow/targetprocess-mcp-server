@@ -5,10 +5,11 @@ import { randomUUID } from "crypto"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import { config as appConfig } from "./config.js"
 import { createTargetprocessMcpServer } from "./index.js"
-import { TpClient } from "./tp.js"
+import { TpClient, type TargetprocessAuth } from "./tp.js"
 import { loadHostedConfig, metadataPathForResource, type HostedConfig } from "./hosted/config.js"
+import { FrontdoorAuthError, FrontdoorClient, FrontdoorOpenTokenCache } from "./hosted/frontdoor.js"
 import { OAuthBroker, OAuthHttpError, type AuthenticatedMcpRequest } from "./hosted/oauth.js"
-import { EncryptedFileTokenStore, type TargetprocessTokenStore } from "./hosted/token_store.js"
+import { EncryptedFileCredentialStore, type TargetprocessCredential, type TargetprocessCredentialStore } from "./hosted/token_store.js"
 import {
   getCookie,
   methodNotAllowed,
@@ -30,7 +31,8 @@ type SessionRecord = {
 type Runtime = {
   config: HostedConfig
   oauth: OAuthBroker
-  tokenStore: TargetprocessTokenStore
+  credentialStore: TargetprocessCredentialStore
+  frontdoorTokens?: FrontdoorOpenTokenCache
   sessions: Map<string, SessionRecord>
 }
 
@@ -112,12 +114,14 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
 
   const account = runtime.oauth.verifyAccountSession(sessionToken)
   if (req.method === "GET") {
-    const hasToken = await runtime.tokenStore.hasToken(account.user.id)
+    const credential = await runtime.credentialStore.getCredential(account.user.id)
     sendHtml(res, 200, accountPage({
       email: account.user.email,
-      hasToken,
+      hasCredential: Boolean(credential),
+      credentialLabel: credentialLabel(credential),
       csrf: account.csrf,
       message: "",
+      frontdoorEnabled: Boolean(runtime.config.frontdoorUrl),
     }))
     return
   }
@@ -126,31 +130,35 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
 
   const contentType = req.headers["content-type"] || ""
   const body = contentType.includes("application/json")
-    ? await readJson<{ csrf?: string; token?: string; action?: string }>(req)
-    : Object.fromEntries((await readForm(req)).entries()) as { csrf?: string; token?: string; action?: string }
+    ? await readJson<AccountPostBody>(req)
+    : Object.fromEntries((await readForm(req)).entries()) as AccountPostBody
 
   if (body.csrf !== account.csrf) throw new OAuthHttpError(403, "invalid_csrf")
 
   if (body.action === "revoke") {
-    await runtime.tokenStore.deleteToken(account.user.id)
+    await runtime.credentialStore.deleteCredential(account.user.id)
+    runtime.frontdoorTokens?.delete(account.user.id)
     sendHtml(res, 200, accountPage({
       email: account.user.email,
-      hasToken: false,
+      hasCredential: false,
+      credentialLabel: "none",
       csrf: account.csrf,
-      message: "Targetprocess token revoked.",
+      message: "Targetprocess credential revoked.",
+      frontdoorEnabled: Boolean(runtime.config.frontdoorUrl),
     }))
     return
   }
 
-  const token = body.token?.trim()
-  if (!token) throw new OAuthHttpError(400, "targetprocess_token_required")
-  await validateTargetprocessToken(runtime.config, token)
-  await runtime.tokenStore.setToken(account.user.id, account.user.email, token)
+  const credential = accountCredentialFromBody(runtime.config, body)
+  await validateTargetprocessCredential(runtime, account.user.id, credential)
+  await runtime.credentialStore.setCredential(account.user.id, account.user.email, credential)
   sendHtml(res, 200, accountPage({
     email: account.user.email,
-    hasToken: true,
+    hasCredential: true,
+    credentialLabel: credentialLabel(credential),
     csrf: account.csrf,
-    message: "Targetprocess token saved.",
+    message: "Targetprocess credential saved.",
+    frontdoorEnabled: Boolean(runtime.config.frontdoorUrl),
   }))
 }
 
@@ -159,7 +167,6 @@ async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResp
   const auth = runtime.oauth.authenticateBearer(req.headers.authorization)
   validateOrigin(runtime.config, auth, req)
 
-  const token = await runtime.tokenStore.getToken(auth.userId)
   const sessionId = headerValue(req.headers["mcp-session-id"])
 
   if (req.method === "DELETE") {
@@ -180,6 +187,9 @@ async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResp
 
   if (req.method !== "POST" && req.method !== "GET") return methodNotAllowed(res)
 
+  const tpAuth = await resolveTargetprocessAuth(runtime, auth.userId)
+  if (!tpAuth) throw new OAuthHttpError(403, "targetprocess_credentials_required")
+
   let transport: StreamableHTTPServerTransport
   if (sessionId) {
     const record = runtime.sessions.get(sessionId)
@@ -198,7 +208,7 @@ async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResp
     })
     const tp = new TpClient({
       baseUrl: runtime.config.tpBaseUrl,
-      token: token || "",
+      auth: tpAuth,
       ownerId: appConfig.tp.ownerId,
       projectId: appConfig.tp.projectId,
       teamId: appConfig.tp.teamId,
@@ -243,15 +253,67 @@ function validateOrigin(config: HostedConfig, auth: AuthenticatedMcpRequest, req
   if (!allowed.has(origin)) throw new OAuthHttpError(403, "invalid_origin")
 }
 
-async function validateTargetprocessToken(config: HostedConfig, token: string): Promise<void> {
+type AccountPostBody = {
+  csrf?: string
+  token?: string
+  key_access?: string
+  keyAccess?: string
+  key_secret?: string
+  keySecret?: string
+  credential_kind?: string
+  credentialKind?: string
+  action?: string
+}
+
+function accountCredentialFromBody(config: HostedConfig, body: AccountPostBody): TargetprocessCredential {
+  const kind = body.credentialKind || body.credential_kind || (config.frontdoorUrl ? "frontdoor_api_key" : "targetprocess_access_token")
+  if (kind === "frontdoor_api_key") {
+    if (!config.frontdoorUrl) throw new OAuthHttpError(400, "frontdoor_not_configured")
+    const keyAccess = (body.keyAccess || body.key_access || "").trim()
+    const keySecret = (body.keySecret || body.key_secret || "").trim()
+    if (!keyAccess || !keySecret) throw new OAuthHttpError(400, "frontdoor_api_key_required")
+    return { kind, keyAccess, keySecret }
+  }
+  if (kind === "targetprocess_access_token") {
+    const token = body.token?.trim()
+    if (!token) throw new OAuthHttpError(400, "targetprocess_token_required")
+    return { kind, token }
+  }
+  throw new OAuthHttpError(400, "unsupported_targetprocess_credential")
+}
+
+async function resolveTargetprocessAuth(runtime: Runtime, userId: string): Promise<TargetprocessAuth | null> {
+  const credential = await runtime.credentialStore.getCredential(userId)
+  if (!credential) return null
+  return targetprocessAuthForCredential(runtime, userId, credential)
+}
+
+async function targetprocessAuthForCredential(runtime: Runtime, userId: string, credential: TargetprocessCredential): Promise<TargetprocessAuth> {
+  if (credential.kind === "targetprocess_access_token") {
+    return { kind: "accessToken", token: credential.token }
+  }
+  if (!runtime.frontdoorTokens) throw new OAuthHttpError(400, "frontdoor_not_configured")
+  try {
+    return {
+      kind: "apptioOpenToken",
+      token: await runtime.frontdoorTokens.getOpenToken(userId, credential),
+    }
+  } catch (error) {
+    if (error instanceof FrontdoorAuthError) throw new OAuthHttpError(403, "frontdoor_credentials_invalid")
+    throw error
+  }
+}
+
+async function validateTargetprocessCredential(runtime: Runtime, userId: string, credential: TargetprocessCredential): Promise<void> {
+  const auth = await targetprocessAuthForCredential(runtime, userId, credential)
   const tp = new TpClient({
-    baseUrl: config.tpBaseUrl,
-    token,
+    baseUrl: runtime.config.tpBaseUrl,
+    auth,
     proxySocket: appConfig.tp.proxySocket,
   })
   const context = await tp.getContext<{ LoggedUser?: { Id?: number | string } }>()
   if (!context?.LoggedUser?.Id) {
-    throw new OAuthHttpError(400, "targetprocess_token_invalid")
+    throw new OAuthHttpError(400, "targetprocess_credentials_invalid")
   }
 }
 
@@ -275,7 +337,26 @@ function handleHttpError(runtime: Runtime, res: ServerResponse, error: unknown):
   sendJson(res, 500, { error: "internal_server_error" })
 }
 
-function accountPage({ email, hasToken, csrf, message }: { email: string; hasToken: boolean; csrf: string; message: string }): string {
+function credentialLabel(credential: TargetprocessCredential | null): string {
+  if (!credential) return "none"
+  return credential.kind === "frontdoor_api_key" ? "Frontdoor API key" : "Targetprocess personal access token"
+}
+
+function accountPage({
+  email,
+  hasCredential,
+  credentialLabel,
+  csrf,
+  message,
+  frontdoorEnabled,
+}: {
+  email: string
+  hasCredential: boolean
+  credentialLabel: string
+  csrf: string
+  message: string
+  frontdoorEnabled: boolean
+}): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -295,12 +376,23 @@ function accountPage({ email, hasToken, csrf, message }: { email: string; hasTok
   <h1>Targetprocess MCP</h1>
   <p>Signed in as ${escapeHtml(email)}.</p>
   ${message ? `<p class="status">${escapeHtml(message)}</p>` : ""}
-  <p>Targetprocess token status: <strong>${hasToken ? "saved" : "not saved"}</strong>.</p>
+  <p>Targetprocess credential status: <strong>${hasCredential ? `saved (${escapeHtml(credentialLabel)})` : "not saved"}</strong>.</p>
+  ${frontdoorEnabled ? `
   <form method="post">
     <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
-    <label for="token">Targetprocess access token</label>
+    <input type="hidden" name="credential_kind" value="frontdoor_api_key">
+    <label for="key_access">Frontdoor API key access</label>
+    <input id="key_access" name="key_access" type="password" autocomplete="off" required>
+    <label for="key_secret">Frontdoor API key secret</label>
+    <input id="key_secret" name="key_secret" type="password" autocomplete="off" required>
+    <button type="submit">Save Frontdoor API key</button>
+  </form>` : ""}
+  <form method="post">
+    <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+    <input type="hidden" name="credential_kind" value="targetprocess_access_token">
+    <label for="token">Targetprocess personal access token</label>
     <input id="token" name="token" type="password" autocomplete="off" required>
-    <button type="submit">Save token</button>
+    <button type="submit">Save Targetprocess token</button>
   </form>
   <form class="danger" method="post">
     <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
@@ -329,7 +421,8 @@ async function main() {
   const runtime: Runtime = {
     config,
     oauth: new OAuthBroker(config),
-    tokenStore: new EncryptedFileTokenStore(config.tokenStorePath, config.tokenEncryptionKey),
+    credentialStore: new EncryptedFileCredentialStore(config.tokenStorePath, config.tokenEncryptionKey),
+    ...(config.frontdoorUrl ? { frontdoorTokens: new FrontdoorOpenTokenCache(new FrontdoorClient(config.frontdoorUrl)) } : {}),
     sessions: new Map(),
   }
   const server = await createHostedServer(runtime)

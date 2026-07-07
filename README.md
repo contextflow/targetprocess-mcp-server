@@ -212,10 +212,11 @@ MCP_OAUTH_CLIENTS_JSON='[{"client_id":"claude-org","name":"Claude org connector"
 OIDC_ISSUER_URL=https://idp.example.com \
 OIDC_CLIENT_ID=<oidc-client-id> \
 OIDC_CLIENT_SECRET=<oidc-client-secret> \
+FRONTDOOR_URL=https://frontdoor.example.com \
 npm run start:http
 ```
 
-Users authenticate through the organization OIDC provider and register their own Targetprocess token at `/account/targetprocess`. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
+Users authenticate through the organization OIDC provider and register their own Frontdoor API key at `/account/targetprocess`; the server exchanges it for `apptio-opentoken` and calls Targetprocess as that user. If `FRONTDOOR_URL` is omitted, users can still register a Targetprocess personal access token as a fallback. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
 
 ### Local Installation for Development
 ```json
