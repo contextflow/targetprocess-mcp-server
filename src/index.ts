@@ -63,6 +63,14 @@ export type TargetprocessMcpContext = {
   userEmail: string
   checkToolCall?: (toolName: string, category: PolicyCategory) => string | null | Promise<string | null>
   prepareToolArgs?: (toolName: string, args: any) => any | Promise<any>
+  auditToolCall?: (event: {
+    toolName: string
+    category: PolicyCategory
+    outcome: "success" | "failure" | "denied"
+    reason?: string
+    args?: any
+    durationMs: number
+  }) => void
 }
 
 export function createTargetprocessMcpServer(tp: TpClient = new TpClient(), context?: TargetprocessMcpContext): McpServer {
@@ -94,12 +102,42 @@ if (context) {
     if (!decision.allowed) return server as any
 
     const wrapped = async (args: any, extra: any) => {
+      const started = Date.now()
       const blocked = await context.checkToolCall?.(name, decision.category)
-      if (blocked) return { content: [{ type: 'text' as const, text: blocked }] }
+      if (blocked) {
+        context.auditToolCall?.({
+          toolName: name,
+          category: decision.category,
+          outcome: "denied",
+          reason: blocked,
+          args,
+          durationMs: Date.now() - started,
+        })
+        return { content: [{ type: 'text' as const, text: blocked }] }
+      }
 
-      const effectiveArgs = await context.prepareToolArgs?.(name, args) || args
-
-      return callback(effectiveArgs, extra)
+      try {
+        const effectiveArgs = await context.prepareToolArgs?.(name, args) || args
+        const result = await callback(effectiveArgs, extra)
+        context.auditToolCall?.({
+          toolName: name,
+          category: decision.category,
+          outcome: "success",
+          args,
+          durationMs: Date.now() - started,
+        })
+        return result
+      } catch (error) {
+        context.auditToolCall?.({
+          toolName: name,
+          category: decision.category,
+          outcome: "failure",
+          reason: error instanceof Error ? error.message : "tool_failed",
+          args,
+          durationMs: Date.now() - started,
+        })
+        throw error
+      }
     }
 
     return (originalRegisterTool as any)(name, config, wrapped)

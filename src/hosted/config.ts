@@ -22,9 +22,12 @@ export type HostedConfig = {
   publicUrl: string
   mcpPath: string
   mcpUrl: string
+  metricsPath: string
+  metricsBearerToken?: string
   oauthIssuer: string
   resource: string
   allowedOrigins: string[]
+  trustProxyHeaders: boolean
   requireHttps: boolean
   signingKey: Buffer
   tokenEncryptionKey: Buffer
@@ -64,6 +67,7 @@ export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Pr
   const publicUrl = requireUrl(env.MCP_PUBLIC_URL, "MCP_PUBLIC_URL")
   const mcpPath = env.MCP_PATH?.trim() || "/mcp"
   const mcpUrl = new URL(mcpPath, publicUrl).toString()
+  const metricsPath = env.MCP_METRICS_PATH?.trim() || "/metrics"
   const oauthIssuer = removeTrailingSlash(env.MCP_OAUTH_ISSUER_URL?.trim() || publicUrl)
   const oidc = await loadOidcConfig(publicUrl, env)
   if (!appConfig.tp.url) throw new Error("TP_BASE_URL is required")
@@ -74,9 +78,12 @@ export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Pr
     publicUrl,
     mcpPath,
     mcpUrl,
+    metricsPath,
+    metricsBearerToken: env.MCP_METRICS_BEARER_TOKEN?.trim() || undefined,
     oauthIssuer,
     resource: env.MCP_RESOURCE?.trim() || mcpUrl,
     allowedOrigins: csv(env.MCP_ALLOWED_ORIGINS),
+    trustProxyHeaders: env.MCP_TRUST_PROXY_HEADERS === "1",
     requireHttps: env.MCP_REQUIRE_HTTPS !== "0",
     signingKey: parseBase64Key(requireEnv(env.MCP_SIGNING_KEY_B64, "MCP_SIGNING_KEY_B64"), 32, "MCP_SIGNING_KEY_B64"),
     tokenEncryptionKey: parseBase64Key(requireEnv(env.TP_TOKEN_ENCRYPTION_KEY_B64, "TP_TOKEN_ENCRYPTION_KEY_B64"), 32, "TP_TOKEN_ENCRYPTION_KEY_B64"),

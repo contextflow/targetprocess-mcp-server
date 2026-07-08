@@ -18,6 +18,8 @@ describe('hosted MCP config', () => {
       TP_TOKEN_ENCRYPTION_KEY_B64: key,
       TP_TOKEN_STORE_PATH: '/var/lib/tp-mcp/tokens.json',
       MCP_OAUTH_STATE_STORE_PATH: '/var/lib/tp-mcp/oauth-state.json',
+      MCP_METRICS_BEARER_TOKEN: 'metrics-token',
+      MCP_TRUST_PROXY_HEADERS: '1',
       TP_SHARED_TOKEN: 'shared-token',
       MCP_OAUTH_CLIENTS_JSON: JSON.stringify([{
         client_id: 'claude-org',
@@ -34,6 +36,9 @@ describe('hosted MCP config', () => {
     } as NodeJS.ProcessEnv)
 
     expect(config.mcpUrl).toBe('https://mcp.example.com/mcp')
+    expect(config.metricsPath).toBe('/metrics')
+    expect(config.metricsBearerToken).toBe('metrics-token')
+    expect(config.trustProxyHeaders).toBe(true)
     expect(config.resource).toBe('https://mcp.example.com/mcp')
     expect(config.oauthClients.get('claude-org')?.redirectUris).toEqual(['https://claude.ai/api/mcp/auth/callback'])
     expect(config.oidc.metadata.tokenEndpoint).toBe('https://idp.example.com/token')

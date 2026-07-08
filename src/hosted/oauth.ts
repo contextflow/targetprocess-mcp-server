@@ -12,6 +12,7 @@ import {
   verifyAsymmetricJwtSignature,
   verifyHmacJwt,
   verifyPkce,
+  type JwtClaims,
 } from "./security.js"
 
 export type AuthenticatedMcpRequest = {
@@ -205,10 +206,15 @@ export class OAuthBroker {
 
   authenticateBearer(authorizationHeader?: string): AuthenticatedMcpRequest {
     const token = bearerToken(authorizationHeader)
-    const claims = verifyHmacJwt(token, this.config.signingKey, {
-      issuer: this.config.oauthIssuer,
-      audience: this.config.resource,
-    })
+    let claims: JwtClaims
+    try {
+      claims = verifyHmacJwt(token, this.config.signingKey, {
+        issuer: this.config.oauthIssuer,
+        audience: this.config.resource,
+      })
+    } catch {
+      throw new OAuthHttpError(401, "invalid_token")
+    }
     const clientId = stringClaim(claims.client_id, "client_id")
     this.requireClient(clientId)
     return {
@@ -235,10 +241,15 @@ export class OAuthBroker {
   }
 
   verifyAccountSession(sessionToken: string): { user: OAuthUser; csrf: string } {
-    const claims = verifyHmacJwt(sessionToken, this.config.signingKey, {
-      issuer: this.config.oauthIssuer,
-      audience: `${this.config.resource}:account`,
-    })
+    let claims: JwtClaims
+    try {
+      claims = verifyHmacJwt(sessionToken, this.config.signingKey, {
+        issuer: this.config.oauthIssuer,
+        audience: `${this.config.resource}:account`,
+      })
+    } catch {
+      throw new OAuthHttpError(401, "invalid_account_session")
+    }
     return {
       user: {
         id: stringClaim(claims.sub, "sub"),

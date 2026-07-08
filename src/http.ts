@@ -12,6 +12,8 @@ import { loadHostedConfig, metadataPathForResource, type HostedConfig } from "./
 import { OAuthBroker, OAuthHttpError, redirectUriAllowed, type AuthenticatedMcpRequest, type OAuthAuthorizationResume } from "./hosted/oauth.js"
 import { decideToolAccess, defaultAccessPolicy, normalizePolicy, sharedTokenPolicy, type AccessMode, type PolicyCategory, type TargetprocessAccessPolicy } from "./hosted/policy.js"
 import { EncryptedFileCredentialStore, type TargetprocessAccount, type TargetprocessCredential, type TargetprocessCredentialStore } from "./hosted/token_store.js"
+import { MetricsRegistry } from "./hosted/metrics.js"
+import { stdoutAuditLogger, targetIdFromArgs, type AuditLogger } from "./hosted/audit.js"
 import {
   getCookie,
   methodNotAllowed,
@@ -39,6 +41,8 @@ type Runtime = {
   oauthResumesLoaded?: boolean
   rateLimits?: Map<string, RateLimitRecord>
   allowEmptyUnauthenticatedMcpProbeUntil?: number
+  metrics?: MetricsRegistry
+  auditLog?: AuditLogger
 }
 
 const accountCookieName = "__Host-tpmcp_account"
@@ -57,20 +61,44 @@ type RateLimitRecord = {
   count: number
 }
 
+type RequestAuditInfo = {
+  requestId: string
+  route: string
+  clientIp: string
+  userId?: string
+  userEmail?: string
+  clientId?: string
+  reason?: string
+  securityFailure?: boolean
+}
+
 export async function createHostedServer(runtime: Runtime) {
+  runtime.metrics ||= new MetricsRegistry()
+  runtime.auditLog ||= stdoutAuditLogger
   return createServer(async (req, res) => {
+    const audit = createRequestAudit(runtime, req)
+    const started = process.hrtime.bigint()
+    res.once("finish", () => finishRequestAudit(runtime, req, res, audit, started))
     try {
-      await route(runtime, req, res)
+      await route(runtime, req, res, audit)
     } catch (error) {
-      handleHttpError(runtime, res, error)
+      const handled = handleHttpError(runtime, res, error)
+      audit.reason = handled.reason
+      audit.securityFailure = handled.securityFailure
     }
   })
 }
 
-async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse, audit: RequestAuditInfo): Promise<void> {
   const url = requestUrl(runtime.config, req)
+  audit.route = normalizedRoute(runtime.config, url)
   if (url.pathname === "/healthz") {
     sendJson(res, 200, { ok: true })
+    return
+  }
+
+  if (url.pathname === runtime.config.metricsPath) {
+    await handleMetrics(runtime, req, res)
     return
   }
 
@@ -93,6 +121,9 @@ async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse
   if (url.pathname === "/oauth/callback") {
     if (req.method !== "GET") return methodNotAllowed(res)
     const result = await runtime.oauth.completeOidcCallback(url)
+    audit.userId = result.user.id
+    audit.userEmail = result.user.email
+    if (result.kind === "oauth") audit.clientId = result.clientId
     if (result.kind === "oauth") {
       const account = await resolveUsableAccount(runtime, result.user.id, result.user.email)
       if (!account) return redirectToCredentialSetup(runtime, res, result)
@@ -123,19 +154,38 @@ async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse
   }
 
   if (url.pathname === "/account/targetprocess") {
-    await handleAccount(runtime, req, res)
+    await handleAccount(runtime, req, res, audit)
     return
   }
 
   if (url.pathname === runtime.config.mcpPath) {
-    await handleMcp(runtime, req, res)
+    await handleMcp(runtime, req, res, audit)
     return
   }
 
   sendText(res, 404, "Not found")
 }
 
-async function handleAccount(runtime: Runtime, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleMetrics(runtime: Runtime, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "GET") return methodNotAllowed(res)
+  const expected = runtime.config.metricsBearerToken
+  if (!expected) {
+    sendText(res, 404, "Not found")
+    return
+  }
+  if (headerValue(req.headers.authorization) !== `Bearer ${expected}`) {
+    throw new OAuthHttpError(401, "invalid_metrics_token")
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+    "Cache-Control": "no-store",
+  })
+  res.end(runtime.metrics?.render({
+    targetprocess_mcp_active_sessions: runtime.sessions.size,
+  }) || "")
+}
+
+async function handleAccount(runtime: Runtime, req: IncomingMessage, res: ServerResponse, audit: RequestAuditInfo): Promise<void> {
   const url = requestUrl(runtime.config, req)
   let resume = validResumeRedirect(runtime.config, url.searchParams.get("resume"))
   let oauthResume = validOAuthResumeId(runtime, url.searchParams.get("oauth_resume"))
@@ -147,6 +197,8 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
   }
 
   const account = runtime.oauth.verifyAccountSession(sessionToken)
+  audit.userId = account.user.id
+  audit.userEmail = account.user.email
   if (req.method === "GET") {
     const storedAccount = await getDisplayAccount(runtime, account.user.id)
     sendHtml(res, 200, accountPage({
@@ -282,13 +334,16 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
   }))
 }
 
-async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResponse, audit: RequestAuditInfo): Promise<void> {
   validateHttpBoundary(runtime.config, req)
   if (!req.headers.authorization && isEmptyPost(req) && (runtime.allowEmptyUnauthenticatedMcpProbeUntil || 0) > Date.now()) {
     sendText(res, 202, "")
     return
   }
   const auth = runtime.oauth.authenticateBearer(req.headers.authorization)
+  audit.userId = auth.userId
+  audit.userEmail = auth.email
+  audit.clientId = auth.clientId
   validateOrigin(runtime.config, auth, req)
 
   const sessionId = headerValue(req.headers["mcp-session-id"])
@@ -358,6 +413,39 @@ async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResp
           ...args,
           comment: `MCP authenticated user: ${auth.email}\n\n${args.comment || ""}`,
         }
+      },
+      auditToolCall: (event) => {
+        runtime.metrics?.increment("targetprocess_mcp_tool_calls_total", "MCP tool calls.", {
+          tool: event.toolName,
+          category: event.category,
+          outcome: event.outcome,
+          access_mode: account.accessMode,
+        })
+        runtime.metrics?.observeDuration("targetprocess_mcp_tool_call_duration_seconds", "MCP tool call duration in seconds.", event.durationMs / 1000, {
+          tool: event.toolName,
+          category: event.category,
+          outcome: event.outcome,
+        })
+        if (event.outcome === "denied" && event.reason?.startsWith("Rate limit exceeded")) {
+          runtime.metrics?.increment("targetprocess_mcp_rate_limit_denials_total", "MCP tool calls denied by rate limits.", {
+            category: event.category,
+          })
+        }
+        runtime.auditLog?.({
+          event: "tool_call",
+          requestId: audit.requestId,
+          clientIp: audit.clientIp,
+          userId: auth.userId,
+          userEmail: auth.email,
+          clientId: auth.clientId,
+          accessMode: account.accessMode,
+          toolName: event.toolName,
+          category: event.category,
+          targetId: targetIdFromArgs(event.args),
+          outcome: event.outcome,
+          reason: reasonCode(event.reason),
+          durationMs: event.durationMs,
+        })
       },
     })
     await server.connect(transport)
@@ -663,20 +751,150 @@ function requestUrl(config: HostedConfig, req: IncomingMessage): URL {
   return new URL(req.url || "/", config.publicUrl)
 }
 
-function handleHttpError(runtime: Runtime, res: ServerResponse, error: unknown): void {
+function createRequestAudit(runtime: Runtime, req: IncomingMessage): RequestAuditInfo {
+  return {
+    requestId: randomUUID(),
+    route: "unknown",
+    clientIp: clientIp(runtime.config, req),
+  }
+}
+
+function finishRequestAudit(
+  runtime: Runtime,
+  req: IncomingMessage,
+  res: ServerResponse,
+  audit: RequestAuditInfo,
+  started: bigint,
+): void {
+  const durationMs = Number(process.hrtime.bigint() - started) / 1_000_000
+  const status = res.statusCode || 500
+  const outcome = status >= 500 ? "failure" : status >= 400 ? "rejected" : "success"
+  const statusClass = `${Math.floor(status / 100)}xx`
+  const route = audit.route || normalizedRoute(runtime.config, requestUrl(runtime.config, req))
+  const reason = audit.reason || statusReason(status)
+
+  runtime.metrics?.increment("targetprocess_mcp_http_requests_total", "Hosted HTTP requests.", {
+    method: req.method || "UNKNOWN",
+    route,
+    status_class: statusClass,
+    outcome,
+  })
+  runtime.metrics?.observeDuration("targetprocess_mcp_http_request_duration_seconds", "Hosted HTTP request duration in seconds.", durationMs / 1000, {
+    method: req.method || "UNKNOWN",
+    route,
+    status_class: statusClass,
+  })
+  if (status >= 400) {
+    runtime.metrics?.increment("targetprocess_mcp_http_failures_total", "Hosted HTTP request failures.", {
+      route,
+      status_class: statusClass,
+      reason,
+    })
+  }
+  if (audit.securityFailure) {
+    runtime.metrics?.increment("targetprocess_mcp_security_failures_total", "Hosted security failures.", {
+      route,
+      reason,
+    })
+    runtime.auditLog?.({
+      event: "tp_mcp_security_failure",
+      requestId: audit.requestId,
+      method: req.method,
+      route,
+      status,
+      outcome: "rejected",
+      reason,
+      clientIp: audit.clientIp,
+      userId: audit.userId,
+      userEmail: audit.userEmail,
+      clientId: audit.clientId,
+      durationMs: Math.round(durationMs),
+    })
+  }
+
+  runtime.auditLog?.({
+    event: "http_request",
+    requestId: audit.requestId,
+    method: req.method,
+    route,
+    status,
+    outcome,
+    reason: status >= 400 ? reason : undefined,
+    clientIp: audit.clientIp,
+    userId: audit.userId,
+    userEmail: audit.userEmail,
+    clientId: audit.clientId,
+    durationMs: Math.round(durationMs),
+  })
+}
+
+function handleHttpError(runtime: Runtime, res: ServerResponse, error: unknown): { reason: string; securityFailure: boolean } {
   if (res.headersSent) {
     res.end()
-    return
+    return { reason: "headers_sent", securityFailure: false }
   }
   if (error instanceof OAuthHttpError) {
     const headers: Record<string, string> | undefined = error.status === 401
       ? { "WWW-Authenticate": runtime.oauth.wwwAuthenticateHeader() }
       : undefined
     sendJson(res, error.status, { error: error.code }, headers)
-    return
+    return { reason: error.code, securityFailure: isSecurityFailure(error.status, error.code) }
   }
   console.error("Hosted MCP request failed:", error instanceof Error ? error.message : error)
   sendJson(res, 500, { error: "internal_server_error" })
+  return { reason: "internal_server_error", securityFailure: false }
+}
+
+function normalizedRoute(config: HostedConfig, url: URL): string {
+  if (url.pathname === "/healthz") return "/healthz"
+  if (url.pathname === config.metricsPath) return config.metricsPath
+  if (url.pathname === metadataPathForResource(config.resource) || url.pathname === "/.well-known/oauth-protected-resource") {
+    return "/.well-known/oauth-protected-resource"
+  }
+  if (url.pathname === "/.well-known/oauth-authorization-server") return "/.well-known/oauth-authorization-server"
+  if (url.pathname === "/oauth/authorize") return "/oauth/authorize"
+  if (url.pathname === "/oauth/callback") return "/oauth/callback"
+  if (url.pathname === "/oauth/token") return "/oauth/token"
+  if (url.pathname === "/account/targetprocess") return "/account/targetprocess"
+  if (url.pathname === config.mcpPath) return config.mcpPath
+  return "not_found"
+}
+
+function clientIp(config: HostedConfig, req: IncomingMessage): string {
+  if (config.trustProxyHeaders) {
+    const forwarded = headerValue(req.headers["x-forwarded-for"])?.split(",")[0]?.trim()
+    if (forwarded) return normalizeIp(forwarded)
+    const realIp = headerValue(req.headers["x-real-ip"])?.trim()
+    if (realIp) return normalizeIp(realIp)
+  }
+  return normalizeIp(req.socket.remoteAddress || "unknown")
+}
+
+function normalizeIp(value: string): string {
+  return value.startsWith("::ffff:") ? value.slice("::ffff:".length) : value
+}
+
+function statusReason(status: number): string {
+  if (status === 400) return "bad_request"
+  if (status === 401) return "unauthorized"
+  if (status === 403) return "forbidden"
+  if (status === 404) return "not_found"
+  if (status === 405) return "method_not_allowed"
+  if (status >= 500) return "internal_server_error"
+  return "ok"
+}
+
+function isSecurityFailure(status: number, reason: string): boolean {
+  if (status === 401 || status === 403) return true
+  return reason === "invalid_host" || reason === "https_required" || reason === "invalid_origin"
+}
+
+function reasonCode(reason: string | undefined): string | undefined {
+  if (!reason) return undefined
+  if (reason.startsWith("Rate limit exceeded")) return "rate_limit_exceeded"
+  if (reason.includes("disabled in your Targetprocess MCP settings")) return "policy_disabled"
+  if (reason.includes("not available when using the service Targetprocess token")) return "shared_token_policy"
+  return reason.slice(0, 120)
 }
 
 function accountPage({
