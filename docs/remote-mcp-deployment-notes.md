@@ -13,7 +13,7 @@ Goal: deploy one shared Targetprocess MCP service so users can connect from Clau
 1. Deploy one central HTTPS MCP endpoint.
    - Example shape: `https://mcp.example.com/targetprocess`
    - The service should expose MCP Streamable HTTP, not only stdio.
-   - This repository now exposes the hosted endpoint at `MCP_PUBLIC_URL + MCP_PATH` (`/mcp` by default) through `npm run start:http` after `npm run build`.
+   - This repository now exposes the hosted endpoint at `MCP_PUBLIC_URL + MCP_PATH` (`/mcp` by default) through `nix run .#hosted`.
 
 2. Keep shared configuration central.
    - Store non-secret configuration such as the Targetprocess base URL in the deployment environment.
@@ -46,8 +46,7 @@ Goal: deploy one shared Targetprocess MCP service so users can connect from Clau
 The hosted entrypoint is `src/http.ts` and is intentionally separate from the stdio entrypoint:
 
 ```sh
-npm run build
-npm run start:http
+nix run .#hosted
 ```
 
 Required environment:
@@ -57,6 +56,7 @@ TP_BASE_URL=https://your-instance.tpondemand.com
 MCP_PUBLIC_URL=https://mcp.example.com
 MCP_SIGNING_KEY_B64=<32 random bytes, base64>
 TP_TOKEN_ENCRYPTION_KEY_B64=<32 random bytes, base64>
+MCP_METRICS_BEARER_TOKEN=<metrics-scrape-token>
 MCP_OAUTH_CLIENTS_JSON='[{"client_id":"claude-org","name":"Claude org connector","redirect_uris":["https://..."],"allowed_origins":["https://claude.ai"]}]'
 OIDC_ISSUER_URL=https://accounts.google.com
 OIDC_CLIENT_ID=<google-oauth-client-id>
@@ -69,6 +69,9 @@ Optional environment:
 
 - `MCP_PORT`: HTTP listen port, default `3000`.
 - `MCP_PATH`: MCP endpoint path, default `/mcp`.
+- `MCP_METRICS_PATH`: Prometheus metrics endpoint path, default `/metrics`.
+- `MCP_METRICS_BEARER_TOKEN`: bearer token required to scrape metrics. Without it, metrics stay unavailable.
+- `MCP_TRUST_PROXY_HEADERS`: set to `1` only when the service is reachable exclusively through a trusted reverse proxy; then audit logs use `X-Forwarded-For`/`X-Real-IP`.
 - `MCP_RESOURCE`: OAuth resource/audience, default `MCP_PUBLIC_URL + MCP_PATH`.
 - `MCP_ALLOWED_ORIGINS`: comma-separated extra HTTP origins accepted on MCP requests.
 - `OIDC_ALLOWED_HOSTED_DOMAINS`: comma-separated Google Workspace hosted domains required in the ID-token `hd` claim. Use this with `OIDC_ISSUER_URL=https://accounts.google.com` when you need Workspace membership, not just an email suffix.
@@ -91,7 +94,8 @@ Changing OIDC allowlist settings affects new OIDC callbacks. Already-issued MCP 
 - Keep `TP_SHARED_TOKEN` limited in Targetprocess, because every service-token user shares that Targetprocess principal for API authorization.
 - Never log tokens, API keys, or raw authorization headers.
 - Restrict outbound network access to the Targetprocess host.
-- Add audit logs for user, tool name, target entity ID, timestamp, and success/failure.
+- JSON audit logs are written to stdout for HTTP requests, security failures, and tool calls.
+- Prometheus metrics cover request outcomes, auth/security failures, tool calls, rate-limit denials, and active sessions.
 - Destructive tools such as ticket deletion are disabled by default and configurable per user.
 - Do not rely on `User-Agent`, DNS, or `Origin` alone to decide whether a caller is Claude, Gemini, or Codex; those signals are spoofable. The enforceable boundary is the registered OAuth client allowlist plus organization OIDC policy.
 - OAuth authorization state, authorization codes, refresh grants, and account-review resumes are persisted under `MCP_OAUTH_STATE_STORE_PATH`. MCP session maps and rate-limit counters are still process-local; multi-replica deployments need sticky sessions or a shared state store.
@@ -103,9 +107,31 @@ Changing OIDC allowlist settings affects new OIDC callbacks. Already-issued MCP 
 3. Done: OAuth/OIDC broker with registered MCP client allowlist.
 4. Done: encrypted per-user Targetprocess token onboarding.
 5. Done: configurable destructive-tool policy and create/comment rate limits.
-6. Partial: token redaction is preserved; structured audit logging is still a follow-up.
+6. Done: token redaction is preserved, structured audit logging is emitted on stdout, and metrics are available for scraping.
 7. Deploy behind the normal HTTPS ingress/reverse proxy.
 8. Register the hosted MCP URL in Claude or provide it to users as the single connector URL.
+
+## NixOS fail2ban
+
+Keep fail2ban close to the systemd journal and match only the stable security event:
+
+```nix
+services.fail2ban = {
+  enable = true;
+  jails.targetprocess-mcp = {
+    filter.Definition.failregex = ''^.*"event":"tp_mcp_security_failure".*"clientIp":"<HOST>".*$'';
+    settings = {
+      backend = "systemd";
+      journalmatch = "_SYSTEMD_UNIT=targetprocess-mcp.service";
+      maxretry = 8;
+      findtime = "10m";
+      bantime = "1h";
+    };
+  };
+};
+```
+
+Run `nix flake check` before deploying changes.
 
 ## Useful References
 

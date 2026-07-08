@@ -37,8 +37,14 @@
             src = self;
 
             nodejs = pkgs.nodejs_22;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
             npmDepsHash = "sha256-ULYwcFwLBoBXBIYdWpZyO6ZSIYzPwC9BLNYu7XZXOI0=";
             npmInstallFlags = [ "--ignore-scripts" ];
+
+            postInstall = ''
+              makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/targetprocess-mcp-server-hosted \
+                --add-flags "$out/lib/node_modules/targetprocess-mcp-server/build/http.js"
+            '';
 
             meta = {
               description = "MCP server for Targetprocess";
@@ -367,6 +373,7 @@
         in
         {
           unjailed = targetprocess-mcp-server;
+          hosted = targetprocess-mcp-server;
         } // linuxPackages // darwinPackages
       );
 
@@ -392,6 +399,11 @@
             program = "${self.packages.${system}.unjailed}/bin/targetprocess-mcp-server";
             meta.description = "Unjailed Targetprocess MCP server";
           };
+          hosted = {
+            type = "app";
+            program = "${self.packages.${system}.hosted}/bin/targetprocess-mcp-server-hosted";
+            meta.description = "Hosted Streamable HTTP Targetprocess MCP server";
+          };
         }
         // lib.optionalAttrs pkgs.stdenv.isLinux {
           jailed = {
@@ -409,8 +421,58 @@
         }
       );
 
-      checks = forAllSystems (system: {
-        inherit (self.packages.${system}) default unjailed;
-      });
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          package = self.packages.${system}.unjailed;
+          hosted = self.packages.${system}.hosted;
+          unit = pkgs.buildNpmPackage {
+            pname = "targetprocess-mcp-server-unit-tests";
+            version = "2.5.0";
+            src = self;
+
+            nodejs = pkgs.nodejs_22;
+            npmDepsHash = "sha256-ULYwcFwLBoBXBIYdWpZyO6ZSIYzPwC9BLNYu7XZXOI0=";
+            npmInstallFlags = [ "--ignore-scripts" ];
+            npmBuildScript = "build";
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              npm test
+              runHook postCheck
+            '';
+            installPhase = ''
+              mkdir -p $out
+              cp -R build $out/build
+            '';
+          };
+        }
+      );
+
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              pkgs.nodejs_22
+              pkgs.nixfmt
+            ];
+          };
+        }
+      );
+
+      formatter = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        pkgs.nixfmt
+      );
     };
 }

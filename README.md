@@ -203,11 +203,11 @@ To rediscover or change the remaining values, start with `TP_BASE_URL` and `TP_T
 The hosted server is opt-in and serves MCP Streamable HTTP at `/mcp` by default. It is intended for organization-managed Claude connectors first, with Gemini/Codex compatibility available by registering additional OAuth clients.
 
 ```bash
-npm run build
 TP_BASE_URL=https://your-instance.tpondemand.com \
 MCP_PUBLIC_URL=https://mcp.example.com \
 MCP_SIGNING_KEY_B64=<32-byte-base64-key> \
 TP_TOKEN_ENCRYPTION_KEY_B64=<32-byte-base64-key> \
+MCP_METRICS_BEARER_TOKEN=<metrics-scrape-token> \
 TP_TOKEN_STORE_PATH=/var/lib/targetprocess-mcp/user-tokens.json \
 MCP_OAUTH_STATE_STORE_PATH=/var/lib/targetprocess-mcp/oauth-state.json \
 MCP_OAUTH_CLIENTS_JSON='[{"client_id":"claude-org","name":"Claude org connector","redirect_uris":["https://..."],"allowed_origins":["https://claude.ai"]}]' \
@@ -216,10 +216,10 @@ OIDC_CLIENT_ID=<google-oauth-client-id> \
 OIDC_CLIENT_SECRET=<google-oauth-client-secret> \
 OIDC_ALLOWED_DOMAINS=<your-org-domain> \
 OIDC_ALLOWED_HOSTED_DOMAINS=<your-google-workspace-domain> \
-npm run start:http
+nix run .#hosted
 ```
 
-Users authenticate through the configured OIDC provider, then configure Targetprocess access at `/account/targetprocess`. They can save a personal access token for user-scoped writes, or use the optional `TP_SHARED_TOKEN` service-token mode for read/search/get/list plus attributed comments. The server validates personal tokens before storing them encrypted and never renders them back later. For Google Workspace, set both `OIDC_ALLOWED_DOMAINS` and `OIDC_ALLOWED_HOSTED_DOMAINS`; the latter checks Google's ID-token `hd` hosted-domain claim. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
+Users authenticate through the configured OIDC provider, then configure Targetprocess access at `/account/targetprocess`. They can save a personal access token for user-scoped writes, or use the optional `TP_SHARED_TOKEN` service-token mode for read/search/get/list plus attributed comments. The server validates personal tokens before storing them encrypted and never renders them back later. For Google Workspace, set both `OIDC_ALLOWED_DOMAINS` and `OIDC_ALLOWED_HOSTED_DOMAINS`; the latter checks Google's ID-token `hd` hosted-domain claim. The hosted server emits JSON audit logs on stdout and exposes Prometheus metrics at `/metrics` when `MCP_METRICS_BEARER_TOKEN` is set. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
 
 ### Local Installation for Development
 ```json
@@ -287,8 +287,8 @@ npm run build
 Tests live in `tests/` and use [Vitest](https://vitest.dev/). All tool handlers are extracted to `src/handlers/` and tested with mocked `TpClient` instances — no network calls are made.
 
 ```bash
-npx vitest run        # run all tests once
-npx vitest            # watch mode
+nix flake check       # build and run the test suite
+nix develop           # enter a Node 22 development shell
 ```
 
 ### Coverage
