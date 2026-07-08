@@ -415,10 +415,18 @@ export class TpClient {
   // instead of null, so callers can surface TP's error detail to the user.
   private async postRaw<T, U>(params: TpClientParameters, data: T): Promise<TpResult<U>> {
     let _url = this.params(this.withAuthParams(params))
+    this.clearRequestDiagnostic()
     this.debug("TP_POST_URL", this.redactUrl(_url))
     this.debug("TP_POST_BODY", data)
     if (!this.authToken()) {
-      return { ok: false, status: 0, body: this.missingAuthMessage() }
+      const message = this.missingAuthMessage()
+      this.recordRequestDiagnostic({
+        method: "POST",
+        url: _url,
+        message,
+        body: JSON.stringify(data),
+      })
+      return { ok: false, status: 0, body: message }
     }
     try {
       const response = await this.fetch(_url, {
@@ -428,11 +436,24 @@ export class TpClient {
       });
       const text = await response.text()
       if (!response.ok) {
+        this.recordRequestDiagnostic({
+          method: "POST",
+          url: _url,
+          message: `HTTP error! status: ${response.status}`,
+          status: response.status,
+          body: JSON.stringify(data),
+        })
         this.debug("TP_POST_ERROR", { status: response.status, body: text })
         return { ok: false, status: response.status, body: text }
       }
       return { ok: true, data: (text ? JSON.parse(text) : null) as U }
     } catch (error) {
+      this.recordRequestDiagnostic({
+        method: "POST",
+        url: _url,
+        message: this.errorMessage(error),
+        body: JSON.stringify(data),
+      })
       console.error("Error making TP request:", error);
       return { ok: false, status: 0, body: String(error) }
     }
@@ -501,6 +522,16 @@ export class TpClient {
     return this.get<T>({
       pathParam: [tpNativeTypeCollection(nativeType), cardId],
       param: { "format": "json" },
+    }) as T
+  }
+
+  async getGeneral<T>(cardId: string): Promise<T> {
+    return this.get<T>({
+      pathParam: ["Generals", cardId],
+      param: {
+        "format": "json",
+        "include": "[Id,Name,ResourceType,EntityType[Name]]",
+      },
     }) as T
   }
 
@@ -865,35 +896,25 @@ export class TpClient {
   async addCommentWithUser<T>(cardId: string, comment: string, user: LoggedUser): Promise<TpResult<T | null>> {
     const userAt = user ? `cc - <div>@user:${user.Email}[${user.FirstName} ${user.LastName}]&nbsp;</div>` : ''
     const commentContent = `${comment}\nn${userAt}`
-    const commentData = {
-      description: commentContent,
-      owner: {
-        id: this.ownerIdConfig
-      },
-      general: {
-        id: cardId,
-      },
-    }
-
-    return this.postRaw<any, T | null>({
-      pathParam: ["comments"],
-      param: { "format": "json" },
-    }, commentData)
+    return this.addComment<T>(cardId, commentContent)
   }
 
   async addComment<T>(cardId: string, comment: string): Promise<TpResult<T | null>> {
-    const commentData = {
-      description: comment,
-      owner: {
-        id: this.ownerIdConfig
+    const ownerId = await this.ownerId()
+    const commentData: Record<string, unknown> = {
+      "Description": comment,
+      "General": {
+        "Id": cardId,
       },
-      general: {
-        id: cardId,
-      },
+    }
+    if (ownerId) {
+      commentData["Owner"] = {
+        "Id": ownerId,
+      }
     }
 
     return this.postRaw<any, T | null>({
-      pathParam: ["comments"],
+      pathParam: ["Comments"],
       param: { "format": "json" },
     }, commentData)
   }

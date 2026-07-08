@@ -23,7 +23,7 @@ import { handleGetReleaseOpenBugs } from "./handlers/get_release_open_bugs.js";
 import { handleGetReleaseOpenUserStories } from "./handlers/get_release_open_user_stories.js";
 import { handleGetUsers } from "./handlers/get_users.js";
 import { handleGetTeams, handleGetTeamsAndTeamAssignments } from "./handlers/get_teams.js";
-import { handleAddComment } from "./handlers/add_comment.js";
+import { handleAddComment, handleCanComment } from "./handlers/add_comment.js";
 import { handleGetUserStoryComments } from "./handlers/get_user_story_comments.js";
 import { handleGetBugComments } from "./handlers/get_bug_comments.js";
 import { handleCreateBug } from "./handlers/create_bug.js";
@@ -609,17 +609,49 @@ server.registerTool(
   'add_comment',
   {
     title: 'Adds provided content to a TP card as a comment',
-    description: `Adds provided content as a comment to the specified tp card by id, e.g. 145789`,
+    description: `Adds provided content as a comment to the specified TP card by id, e.g. 67318. Works across Epics, Features, UserStories, Bugs, Requests, and internal cards.`,
     inputSchema: {
       id: z.string()
         .min(5)
         .max(6)
-        .describe('TP card id, usually user story or bug ID (e.g. 145789)'),
+        .describe('TP card id (e.g. 67318)'),
       comment: z.string()
         .describe('Comment content to add'),
     },
   },
   async ({ id, comment }) => handleAddComment(tp, id, comment)
+)
+
+server.registerTool(
+  'comment_on_card',
+  {
+    title: 'Comment on a TP card',
+    description: `Adds provided content as a comment to any Targetprocess card by id. Prefer this tool when the card may be an Epic, Feature, UserStory, Bug, Request, Opportunity, or other internal card.`,
+    inputSchema: {
+      id: z.string()
+        .min(5)
+        .max(6)
+        .describe('TP card id (e.g. 67318)'),
+      comment: z.string()
+        .describe('Comment content to add'),
+    },
+  },
+  async ({ id, comment }) => handleAddComment(tp, id, comment)
+)
+
+server.registerTool(
+  'can_comment',
+  {
+    title: 'Validate TP card comment support',
+    description: 'Checks whether the generic comment flow can target the specified Targetprocess card id.',
+    inputSchema: {
+      id: z.string()
+        .min(5)
+        .max(6)
+        .describe('TP card id (e.g. 67318)'),
+    },
+  },
+  async ({ id }) => handleCanComment(tp, id)
 )
 
 server.registerTool(

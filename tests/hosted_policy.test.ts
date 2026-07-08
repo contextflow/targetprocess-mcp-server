@@ -4,7 +4,9 @@ import { decideToolAccess, defaultAccessPolicy, sharedTokenPolicy } from '../src
 describe('hosted Targetprocess tool access policy', () => {
   it('limits service-token users to reads and attributed comments', () => {
     expect(decideToolAccess('shared', sharedTokenPolicy, 'get_opportunities')).toMatchObject({ allowed: true, category: 'read' })
+    expect(decideToolAccess('shared', sharedTokenPolicy, 'can_comment')).toMatchObject({ allowed: true, category: 'read' })
     expect(decideToolAccess('shared', sharedTokenPolicy, 'add_comment')).toMatchObject({ allowed: true, category: 'comment' })
+    expect(decideToolAccess('shared', sharedTokenPolicy, 'comment_on_card')).toMatchObject({ allowed: true, category: 'comment' })
     expect(decideToolAccess('shared', sharedTokenPolicy, 'add_comment_with_user')).toMatchObject({ allowed: false, category: 'comment' })
     expect(decideToolAccess('shared', sharedTokenPolicy, 'create_user_story')).toMatchObject({ allowed: false, category: 'create' })
     expect(decideToolAccess('shared', sharedTokenPolicy, 'delete_internal_card')).toMatchObject({ allowed: false, category: 'delete' })

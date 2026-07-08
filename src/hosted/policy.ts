@@ -71,10 +71,10 @@ export function normalizePolicy(input: Partial<TargetprocessAccessPolicy> | unde
 }
 
 export function toolCategory(toolName: string): PolicyCategory {
-  if (toolName.startsWith("get_") || toolName.startsWith("search_") || toolName.startsWith("list_") || toolName === "get_version") {
+  if (toolName.startsWith("get_") || toolName.startsWith("search_") || toolName.startsWith("list_") || toolName === "get_version" || toolName === "can_comment") {
     return "read"
   }
-  if (toolName === "add_comment" || toolName === "add_comment_with_user") return "comment"
+  if (toolName === "add_comment" || toolName === "comment_on_card" || toolName === "add_comment_with_user") return "comment"
   if (toolName === "delete_internal_card" || toolName === "delete_card_relation") return "delete"
   if (toolName === "add_file_attachment") return "attachment"
   if (toolName === "add_card_labels") return "label"
@@ -95,7 +95,7 @@ export function decideToolAccess(
 
   if (accessMode === "shared") {
     if (category === "read") return { allowed: true, category }
-    if (toolName === "add_comment" && policy.allowComments) return { allowed: true, category }
+    if ((toolName === "add_comment" || toolName === "comment_on_card") && policy.allowComments) return { allowed: true, category }
     return { allowed: false, category, reason: "This tool is not available when using the service Targetprocess token." }
   }
 

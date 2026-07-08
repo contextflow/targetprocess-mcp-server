@@ -1,17 +1,23 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { handleAddComment } from '../src/handlers/add_comment.js'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { handleAddComment, handleCanComment } from '../src/handlers/add_comment.js'
 import { handleGetUserStoryComments } from '../src/handlers/get_user_story_comments.js'
 import { handleGetBugComments } from '../src/handlers/get_bug_comments.js'
-import type { TpClient } from '../src/tp.js'
+import { TpClient } from '../src/tp.js'
 
 const mockTp = {
   addComment: vi.fn(),
+  getGeneral: vi.fn(),
+  getLastRequestDiagnostic: vi.fn(),
   getUserStoryComments: vi.fn(),
   getBugComments: vi.fn(),
 } as unknown as TpClient
 
 beforeEach(() => {
   vi.clearAllMocks()
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe('handleAddComment', () => {
@@ -50,12 +56,77 @@ describe('handleAddComment', () => {
     expect(result.content[0].text).toContain('145789')
   })
 
+  it('surfaces attempted request diagnostics on failure when available', async () => {
+    vi.mocked(mockTp.addComment).mockResolvedValue({
+      ok: false,
+      status: 400,
+      body: '{"Message":"Error during deserializing resource."}',
+    } as any)
+    vi.mocked(mockTp.getLastRequestDiagnostic).mockReturnValue({
+      method: 'POST',
+      url: 'https://example.tpondemand.com/api/v1/Comments/?format=json&access_token=***',
+      message: 'HTTP error! status: 400',
+      status: 400,
+      body: '{"Description":"Test comment","General":{"Id":"145789"}}',
+    })
+
+    const result = await handleAddComment(mockTp, '145789', 'Test comment')
+
+    expect(result.content[0].text).toContain('Request: POST https://example.tpondemand.com/api/v1/Comments/?format=json&access_token=***')
+    expect(result.content[0].text).toContain('"General":{"Id":"145789"}')
+  })
+
   it('calls addComment with the provided id and comment', async () => {
     vi.mocked(mockTp.addComment).mockResolvedValue({ ok: true, data: { Id: 1 } } as any)
 
     await handleAddComment(mockTp, '145789', 'my comment')
 
     expect(mockTp.addComment).toHaveBeenCalledWith('145789', 'my comment')
+  })
+})
+
+describe('handleCanComment', () => {
+  it('returns generic comment support metadata for a card', async () => {
+    vi.mocked(mockTp.getGeneral).mockResolvedValue({
+      Id: 67318,
+      Name: 'Deploy and document the TargetProcess MCP for others',
+      ResourceType: 'Epic',
+    } as any)
+
+    const result = await handleCanComment(mockTp, '67318')
+    const parsed = JSON.parse(result.content[0].text)
+
+    expect(mockTp.getGeneral).toHaveBeenCalledWith('67318')
+    expect(parsed).toMatchObject({
+      id: 67318,
+      nativeType: 'Epic',
+      collection: 'Comments',
+      addCommentSupported: true,
+    })
+  })
+})
+
+describe('TpClient comment payloads', () => {
+  it('posts comments through the canonical Comments collection payload', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ Id: 5 }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const tp = new TpClient({
+      baseUrl: 'https://example.tpondemand.com',
+      auth: { kind: 'accessToken', token: 'tp-token' },
+      ownerId: '113',
+    })
+
+    await tp.addComment('67318', 'Test comment')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toContain('/api/v1/Comments/')
+    expect(String(url)).toContain('access_token=tp-token')
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      Description: 'Test comment',
+      General: { Id: '67318' },
+      Owner: { Id: '113' },
+    })
   })
 })
 

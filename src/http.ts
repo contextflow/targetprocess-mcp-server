@@ -353,7 +353,7 @@ async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResp
       },
       prepareToolArgs: async (toolName, args) => {
         const freshAccount = await getDisplayAccount(runtime, auth.userId)
-        if (freshAccount.accessMode !== "shared" || toolName !== "add_comment") return args
+        if (freshAccount.accessMode !== "shared" || (toolName !== "add_comment" && toolName !== "comment_on_card")) return args
         return {
           ...args,
           comment: `MCP authenticated user: ${auth.email}\n\n${args.comment || ""}`,
