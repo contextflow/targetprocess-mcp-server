@@ -208,6 +208,8 @@ TP_BASE_URL=https://your-instance.tpondemand.com \
 MCP_PUBLIC_URL=https://mcp.example.com \
 MCP_SIGNING_KEY_B64=<32-byte-base64-key> \
 TP_TOKEN_ENCRYPTION_KEY_B64=<32-byte-base64-key> \
+TP_TOKEN_STORE_PATH=/var/lib/targetprocess-mcp/user-tokens.json \
+MCP_OAUTH_STATE_STORE_PATH=/var/lib/targetprocess-mcp/oauth-state.json \
 MCP_OAUTH_CLIENTS_JSON='[{"client_id":"claude-org","name":"Claude org connector","redirect_uris":["https://..."],"allowed_origins":["https://claude.ai"]}]' \
 OIDC_ISSUER_URL=https://accounts.google.com \
 OIDC_CLIENT_ID=<google-oauth-client-id> \
@@ -216,7 +218,7 @@ OIDC_ALLOWED_DOMAINS=<your-org-domain> \
 npm run start:http
 ```
 
-Users authenticate through the configured OIDC provider, then save their own Targetprocess personal access token at `/account/targetprocess`. The server validates the token before storing it encrypted and never renders it back later. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
+Users authenticate through the configured OIDC provider, then configure Targetprocess access at `/account/targetprocess`. They can save a personal access token for user-scoped writes, or use the optional `TP_SHARED_TOKEN` service-token mode for read/search/get/list plus attributed comments. The server validates personal tokens before storing them encrypted and never renders them back later. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
 
 ### Local Installation for Development
 ```json

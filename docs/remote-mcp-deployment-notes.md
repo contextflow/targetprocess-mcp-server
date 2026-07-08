@@ -17,13 +17,16 @@ Goal: deploy one shared Targetprocess MCP service so users can connect from Clau
 
 2. Keep shared configuration central.
    - Store non-secret configuration such as the Targetprocess base URL in the deployment environment.
-   - Do not configure a single shared Targetprocess API token for all users.
+   - Prefer per-user Targetprocess personal access tokens for write-capable use.
+   - Optionally configure one service Targetprocess token for users who only need search/read plus attributed comments.
 
 3. Let each user authenticate with their own credentials.
    - The hosted service acts as an OAuth authorization server for the MCP resource and delegates user sign-in to the organization OIDC provider.
    - Users save their own Targetprocess personal access token at `/account/targetprocess` after OIDC sign-in.
    - The account page links to the Targetprocess personal access token settings page derived from `TP_BASE_URL`.
    - The service validates the token against Targetprocess before saving it.
+   - Users can choose the service token mode when `TP_SHARED_TOKEN` is configured; that mode only exposes read/search/get/list tools plus comments, and comments are prefixed with the authenticated OIDC email address.
+   - Personal token users can disable write categories and set hourly create/comment limits from the account page.
    - Stored Targetprocess credentials are encrypted at rest with `TP_TOKEN_ENCRYPTION_KEY_B64`.
 
 4. Resolve credentials per request.
@@ -69,11 +72,11 @@ Optional environment:
 - `MCP_ALLOWED_ORIGINS`: comma-separated extra HTTP origins accepted on MCP requests.
 - `OIDC_ALLOWED_GROUPS`: comma-separated required group names.
 - `TP_TOKEN_STORE_PATH`: encrypted JSON token store path, default `/tmp/targetprocess-mcp-user-tokens.json`.
+- `MCP_OAUTH_STATE_STORE_PATH`: OAuth authorization state, code, refresh-token, and account-review resume JSON store path. Defaults to `TP_TOKEN_STORE_PATH + ".oauth-state.json"`.
+- `TP_SHARED_TOKEN`: optional service Targetprocess personal access token for read/search/get/list plus attributed comments.
 - `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ALLOWED_DOMAINS`, `OIDC_AUTHORIZATION_ENDPOINT`, `OIDC_TOKEN_ENDPOINT`, `OIDC_JWKS_URI`: OIDC upstream login configuration. The explicit endpoint variables are optional when issuer discovery works.
 
-For production, put `TP_TOKEN_STORE_PATH` on a persistent encrypted volume or replace the credential-store implementation with a managed database/secret store. The current in-repo implementation is a single-instance encrypted file store.
-
-Frontdoor browser login was investigated as a future SSO option, but it requires a registered/allowlisted Frontdoor application callback. The API-key/OpenToken workaround is not part of the supported hosted flow.
+For production, put `TP_TOKEN_STORE_PATH` and `MCP_OAUTH_STATE_STORE_PATH` on a persistent encrypted volume or replace the file-store implementations with a managed database/secret store. The current in-repo implementation is a single-instance encrypted credential file plus a single-instance OAuth state file.
 
 ## Security Baseline
 
@@ -81,12 +84,13 @@ Frontdoor browser login was investigated as a future SSO option, but it requires
 - Require authentication on every MCP request.
 - Validate HTTP `Origin` headers.
 - Encrypt stored user credentials.
+- Keep `TP_SHARED_TOKEN` limited in Targetprocess, because every service-token user shares that Targetprocess principal for API authorization.
 - Never log tokens, API keys, or raw authorization headers.
 - Restrict outbound network access to the Targetprocess host.
 - Add audit logs for user, tool name, target entity ID, timestamp, and success/failure.
-- Consider role-gating destructive tools such as delete operations.
+- Destructive tools such as ticket deletion are disabled by default and configurable per user.
 - Do not rely on `User-Agent`, DNS, or `Origin` alone to decide whether a caller is Claude, Gemini, or Codex; those signals are spoofable. The enforceable boundary is the registered OAuth client allowlist plus organization OIDC policy.
-- The in-memory OAuth authorization-code, refresh-token, and MCP session maps are suitable for one service instance. Multi-replica deployments need sticky sessions or a shared state store.
+- OAuth authorization state, authorization codes, refresh grants, and account-review resumes are persisted under `MCP_OAUTH_STATE_STORE_PATH`. MCP session maps and rate-limit counters are still process-local; multi-replica deployments need sticky sessions or a shared state store.
 
 ## Implementation Tasks
 
@@ -94,9 +98,10 @@ Frontdoor browser login was investigated as a future SSO option, but it requires
 2. Done: Streamable HTTP MCP endpoint at `/mcp`.
 3. Done: OAuth/OIDC broker with registered MCP client allowlist.
 4. Done: encrypted per-user Targetprocess token onboarding.
-5. Partial: token redaction is preserved; structured audit logging is still a follow-up.
-6. Deploy behind the normal HTTPS ingress/reverse proxy.
-7. Register the hosted MCP URL in Claude or provide it to users as the single connector URL.
+5. Done: configurable destructive-tool policy and create/comment rate limits.
+6. Partial: token redaction is preserved; structured audit logging is still a follow-up.
+7. Deploy behind the normal HTTPS ingress/reverse proxy.
+8. Register the hosted MCP URL in Claude or provide it to users as the single connector URL.
 
 ## Useful References
 
