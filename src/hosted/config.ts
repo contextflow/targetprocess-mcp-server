@@ -41,6 +41,7 @@ export type HostedConfig = {
     redirectUri: string
     scopes: string[]
     allowedDomains: string[]
+    allowedHostedDomains: string[]
     allowedGroups: string[]
     metadata: OidcMetadata
   }
@@ -168,7 +169,8 @@ async function loadOidcConfig(publicUrl: string, env: NodeJS.ProcessEnv): Promis
     clientSecret: requireEnv(env.OIDC_CLIENT_SECRET, "OIDC_CLIENT_SECRET"),
     redirectUri: new URL("/oauth/callback", publicUrl).toString(),
     scopes: csv(env.OIDC_SCOPES || "openid,email,profile"),
-    allowedDomains: csv(env.OIDC_ALLOWED_DOMAINS),
+    allowedDomains: domainCsv(env.OIDC_ALLOWED_DOMAINS),
+    allowedHostedDomains: domainCsv(env.OIDC_ALLOWED_HOSTED_DOMAINS),
     allowedGroups: csv(env.OIDC_ALLOWED_GROUPS),
     metadata: oidcMetadata,
   }
@@ -202,6 +204,10 @@ function csv(value: string | undefined): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function domainCsv(value: string | undefined): string[] {
+  return csv(value).map((item) => item.toLowerCase())
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number, name: string): number {

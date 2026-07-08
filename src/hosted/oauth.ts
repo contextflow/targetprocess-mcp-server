@@ -377,6 +377,9 @@ export class OAuthBroker {
     url.searchParams.set("scope", oidc.scopes.join(" "))
     url.searchParams.set("state", state)
     url.searchParams.set("nonce", nonce)
+    if (oidc.allowedHostedDomains.length > 0) {
+      url.searchParams.set("hd", oidc.allowedHostedDomains[0])
+    }
     return url.toString()
   }
 
@@ -429,6 +432,9 @@ export class OAuthBroker {
     if (typeof claims.exp !== "number" || claims.exp <= now) throw new OAuthHttpError(401, "oidc_expired")
     if (claims.nonce !== nonce) throw new OAuthHttpError(401, "oidc_bad_nonce")
     if (claims.email_verified === false) throw new OAuthHttpError(403, "oidc_email_not_verified")
+    if ((oidc.allowedDomains.length > 0 || oidc.allowedHostedDomains.length > 0) && claims.email_verified !== true) {
+      throw new OAuthHttpError(403, "oidc_email_not_verified")
+    }
   }
 
   private async getJwks(): Promise<Record<string, unknown>[]> {
@@ -447,6 +453,13 @@ export class OAuthBroker {
       const domain = email.split("@")[1] || ""
       if (!oidc.allowedDomains.includes(domain)) {
         throw new OAuthHttpError(403, "org_domain_required")
+      }
+    }
+
+    if (oidc.allowedHostedDomains.length > 0) {
+      const hostedDomain = typeof claims.hd === "string" ? claims.hd.toLowerCase() : ""
+      if (!oidc.allowedHostedDomains.includes(hostedDomain)) {
+        throw new OAuthHttpError(403, "org_hosted_domain_required")
       }
     }
 

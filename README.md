@@ -215,10 +215,11 @@ OIDC_ISSUER_URL=https://accounts.google.com \
 OIDC_CLIENT_ID=<google-oauth-client-id> \
 OIDC_CLIENT_SECRET=<google-oauth-client-secret> \
 OIDC_ALLOWED_DOMAINS=<your-org-domain> \
+OIDC_ALLOWED_HOSTED_DOMAINS=<your-google-workspace-domain> \
 npm run start:http
 ```
 
-Users authenticate through the configured OIDC provider, then configure Targetprocess access at `/account/targetprocess`. They can save a personal access token for user-scoped writes, or use the optional `TP_SHARED_TOKEN` service-token mode for read/search/get/list plus attributed comments. The server validates personal tokens before storing them encrypted and never renders them back later. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
+Users authenticate through the configured OIDC provider, then configure Targetprocess access at `/account/targetprocess`. They can save a personal access token for user-scoped writes, or use the optional `TP_SHARED_TOKEN` service-token mode for read/search/get/list plus attributed comments. The server validates personal tokens before storing them encrypted and never renders them back later. For Google Workspace, set both `OIDC_ALLOWED_DOMAINS` and `OIDC_ALLOWED_HOSTED_DOMAINS`; the latter checks Google's ID-token `hd` hosted-domain claim. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
 
 ### Local Installation for Development
 ```json

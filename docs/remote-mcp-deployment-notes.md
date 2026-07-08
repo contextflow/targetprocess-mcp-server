@@ -62,6 +62,7 @@ OIDC_ISSUER_URL=https://accounts.google.com
 OIDC_CLIENT_ID=<google-oauth-client-id>
 OIDC_CLIENT_SECRET=<google-oauth-client-secret>
 OIDC_ALLOWED_DOMAINS=<your-org-domain>
+OIDC_ALLOWED_HOSTED_DOMAINS=<your-google-workspace-domain>
 ```
 
 Optional environment:
@@ -70,13 +71,16 @@ Optional environment:
 - `MCP_PATH`: MCP endpoint path, default `/mcp`.
 - `MCP_RESOURCE`: OAuth resource/audience, default `MCP_PUBLIC_URL + MCP_PATH`.
 - `MCP_ALLOWED_ORIGINS`: comma-separated extra HTTP origins accepted on MCP requests.
+- `OIDC_ALLOWED_HOSTED_DOMAINS`: comma-separated Google Workspace hosted domains required in the ID-token `hd` claim. Use this with `OIDC_ISSUER_URL=https://accounts.google.com` when you need Workspace membership, not just an email suffix.
 - `OIDC_ALLOWED_GROUPS`: comma-separated required group names.
 - `TP_TOKEN_STORE_PATH`: encrypted JSON token store path, default `/tmp/targetprocess-mcp-user-tokens.json`.
 - `MCP_OAUTH_STATE_STORE_PATH`: OAuth authorization state, code, refresh-token, and account-review resume JSON store path. Defaults to `TP_TOKEN_STORE_PATH + ".oauth-state.json"`.
 - `TP_SHARED_TOKEN`: optional service Targetprocess personal access token for read/search/get/list plus attributed comments.
-- `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ALLOWED_DOMAINS`, `OIDC_AUTHORIZATION_ENDPOINT`, `OIDC_TOKEN_ENDPOINT`, `OIDC_JWKS_URI`: OIDC upstream login configuration. The explicit endpoint variables are optional when issuer discovery works.
+- `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ALLOWED_DOMAINS`, `OIDC_ALLOWED_HOSTED_DOMAINS`, `OIDC_AUTHORIZATION_ENDPOINT`, `OIDC_TOKEN_ENDPOINT`, `OIDC_JWKS_URI`: OIDC upstream login configuration. The explicit endpoint variables are optional when issuer discovery works.
 
 For production, put `TP_TOKEN_STORE_PATH` and `MCP_OAUTH_STATE_STORE_PATH` on a persistent encrypted volume or replace the file-store implementations with a managed database/secret store. The current in-repo implementation is a single-instance encrypted credential file plus a single-instance OAuth state file.
+
+Changing OIDC allowlist settings affects new OIDC callbacks. Already-issued MCP access tokens and refresh tokens remain usable until their configured expiry unless you rotate `MCP_SIGNING_KEY_B64` or clear `MCP_OAUTH_STATE_STORE_PATH`.
 
 ## Security Baseline
 

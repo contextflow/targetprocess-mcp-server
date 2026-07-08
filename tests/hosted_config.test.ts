@@ -37,6 +37,8 @@ describe('hosted MCP config', () => {
     expect(config.resource).toBe('https://mcp.example.com/mcp')
     expect(config.oauthClients.get('claude-org')?.redirectUris).toEqual(['https://claude.ai/api/mcp/auth/callback'])
     expect(config.oidc.metadata.tokenEndpoint).toBe('https://idp.example.com/token')
+    expect(config.oidc.allowedDomains).toEqual([])
+    expect(config.oidc.allowedHostedDomains).toEqual([])
     expect(config.tpPersonalAccessTokensUrl).toBe('https://example.tpondemand.com/RestUI/Board.aspx#page=settings/authAndSecurity/personalAccessTokensTab')
     expect(config.tokenStorePath).toBe('/var/lib/tp-mcp/tokens.json')
     expect(config.oauthStateStorePath).toBe('/var/lib/tp-mcp/oauth-state.json')
@@ -74,5 +76,31 @@ describe('hosted MCP config', () => {
         redirect_uris: ['https://claude.ai/api/mcp/auth/callback'],
       }]),
     } as NodeJS.ProcessEnv)).rejects.toThrow('OIDC_ISSUER_URL')
+  })
+
+  it('normalizes OIDC domain allowlists', async () => {
+    vi.stubEnv('TP_BASE_URL', 'https://example.tpondemand.com')
+    const { loadHostedConfig } = await import('../src/hosted/config.js')
+
+    const config = await loadHostedConfig({
+      MCP_PUBLIC_URL: 'https://mcp.example.com',
+      MCP_SIGNING_KEY_B64: key,
+      TP_TOKEN_ENCRYPTION_KEY_B64: key,
+      MCP_OAUTH_CLIENTS_JSON: JSON.stringify([{
+        client_id: 'claude-org',
+        redirect_uris: ['https://claude.ai/api/mcp/auth/callback'],
+      }]),
+      OIDC_ISSUER_URL: 'https://idp.example.com',
+      OIDC_CLIENT_ID: 'oidc-client',
+      OIDC_CLIENT_SECRET: 'oidc-secret',
+      OIDC_AUTHORIZATION_ENDPOINT: 'https://idp.example.com/authorize',
+      OIDC_TOKEN_ENDPOINT: 'https://idp.example.com/token',
+      OIDC_JWKS_URI: 'https://idp.example.com/jwks',
+      OIDC_ALLOWED_DOMAINS: 'Example.COM',
+      OIDC_ALLOWED_HOSTED_DOMAINS: 'Example.COM',
+    } as NodeJS.ProcessEnv)
+
+    expect(config.oidc.allowedDomains).toEqual(['example.com'])
+    expect(config.oidc.allowedHostedDomains).toEqual(['example.com'])
   })
 })

@@ -41,7 +41,7 @@ All sensitive configuration (`TP_TOKEN`, `TP_BASE_URL`, `TP_OWNER_ID`, `TP_PROJE
 
 The default MCP server communicates over stdio. It does not open any network ports and is not directly reachable over a network, which limits its attack surface to the process that spawns it (typically an MCP client such as Claude Desktop or Claude Code).
 
-Hosted mode is opt-in via `npm run start:http` after build. It exposes a Streamable HTTP MCP endpoint and must be deployed behind HTTPS. The hosted endpoint validates `Host`, forwarded HTTPS, `Origin`, MCP bearer token issuer/audience/expiry, OAuth client registration, and MCP session ownership on each request.
+Hosted mode is opt-in via `npm run start:http` after build. It exposes a Streamable HTTP MCP endpoint and must be deployed behind HTTPS. The hosted endpoint validates `Host`, forwarded HTTPS, `Origin`, MCP bearer token issuer/audience/expiry, OAuth client registration, organization OIDC email and optional Google Workspace hosted-domain claims, and MCP session ownership on each request.
 
 The Nix flake default app wraps the server in an OS sandbox. On Linux it uses [jail.nix](https://git.sr.ht/~alexdavid/jail.nix) with bubblewrap. On macOS it uses the built-in Seatbelt sandbox through `/usr/bin/sandbox-exec`. The default app starts a local tinyproxy allowlist proxy outside the sandbox, exposes it to Node through a private Unix socket directory, and only allows HTTPS CONNECT to the exact host from `TP_BASE_URL` on port 443. The launcher fails closed if tinyproxy, the socket bridge, or the macOS Seatbelt profile cannot be started.
 
@@ -61,5 +61,6 @@ Keep dependencies up to date to pick up security patches. Run `npm audit` period
 
 - Stdio `TP_TOKEN` and hosted personal access token fallback credentials are passed as URL query parameters, which may appear in HTTP server access logs on the Targetprocess side. Hosted Frontdoor credentials use the `apptio-opentoken` header instead.
 - No outbound request signing or mutual TLS is implemented; the server relies entirely on HTTPS and token-based auth provided by the Targetprocess platform.
+- Hosted OIDC allowlist changes apply to new OIDC callbacks. Already-issued MCP access and refresh tokens remain valid until expiry unless the signing key or OAuth state is rotated.
 - Hosted mode's built-in encrypted file token store is single-instance storage. Multi-replica deployments should replace it with a shared database or secret-store implementation and use shared OAuth/session state or sticky sessions.
 - Restrict hosted OAuth clients with `MCP_OAUTH_CLIENTS_JSON`; do not treat `User-Agent` or `Origin` as proof that the caller is Claude, Gemini, or Codex.

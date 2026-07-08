@@ -89,6 +89,7 @@ function hostedConfig(): HostedConfig {
       redirectUri: 'http://localhost:3000/oauth/callback',
       scopes: ['openid', 'email', 'profile'],
       allowedDomains: [],
+      allowedHostedDomains: [],
       allowedGroups: [],
       metadata: {
         issuer: 'https://idp.example.com',
