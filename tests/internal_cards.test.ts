@@ -17,6 +17,7 @@ const mockTp = {
   createUserStory: vi.fn(),
   createBugOnly: vi.fn(),
   createRequest: vi.fn(),
+  getTeams: vi.fn(),
   deleteCard: vi.fn(),
   getLastRequestDiagnostic: vi.fn(),
 } as unknown as TpClient
@@ -102,7 +103,7 @@ describe('handleGetInternalCard', () => {
 })
 
 describe('handleCreateInternalCard', () => {
-  it('creates opportunities as Epics with custom fields', async () => {
+  it('creates opportunities as Epics without fragile team or custom field payloads', async () => {
     vi.mocked(mockTp.createEpic).mockResolvedValue({ Id: 67265, Name: 'Support ARM in the product' } as any)
 
     const customFields = [
@@ -114,6 +115,7 @@ describe('handleCreateInternalCard', () => {
       kind: 'opportunity',
       title: 'Support ARM in the product',
       projectId: '26420',
+      teamId: 'DevOps',
       customFields,
     })
     const parsed = JSON.parse(result.content[0].text)
@@ -122,8 +124,44 @@ describe('handleCreateInternalCard', () => {
     expect(mockTp.createEpic).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Support ARM in the product',
       projectId: '26420',
-      customFields,
     }))
+    expect(mockTp.getTeams).not.toHaveBeenCalled()
+  })
+
+  it('resolves team names before creating assignable non-Epic cards', async () => {
+    vi.mocked(mockTp.getTeams).mockResolvedValue({
+      Next: '',
+      Items: [{ Id: 15987, Name: 'DevOps' }],
+    } as any)
+    vi.mocked(mockTp.createRequest).mockResolvedValue({ Id: 67266, Name: 'PCR: Deploy MCP' } as any)
+
+    const result = await handleCreateInternalCard(mockTp, {
+      kind: 'PCR',
+      title: 'PCR: Deploy MCP',
+      teamId: 'DevOps',
+    })
+    const parsed = JSON.parse(result.content[0].text)
+
+    expect(parsed.Id).toBe(67266)
+    expect(mockTp.createRequest).toHaveBeenCalledWith(expect.objectContaining({
+      teamId: '15987',
+    }))
+  })
+
+  it('returns a useful error when a team name cannot be resolved for assignable non-Epic cards', async () => {
+    vi.mocked(mockTp.getTeams).mockResolvedValue({
+      Next: '',
+      Items: [{ Id: 15987, Name: 'DevOps' }],
+    } as any)
+
+    const result = await handleCreateInternalCard(mockTp, {
+      kind: 'PCR',
+      title: 'PCR: Deploy MCP',
+      teamId: 'Unknown Team',
+    })
+
+    expect(result.content[0].text).toContain('Could not resolve Targetprocess team "Unknown Team"')
+    expect(mockTp.createRequest).not.toHaveBeenCalled()
   })
 
   it('creates PCRs as Targetprocess Requests with a structured HTML description', async () => {

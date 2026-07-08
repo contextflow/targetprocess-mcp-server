@@ -99,6 +99,24 @@ export async function handleGetInternalCard(
   return textResult(JSON.stringify(normalizeCard(card, definition, getClientBaseUrl(tp))))
 }
 
+async function resolveTeamId(tp: TpClient, teamId: string | undefined): Promise<string | null | undefined> {
+  const value = teamId?.trim()
+  if (!value) return undefined
+  if (/^\d+$/.test(value)) return value
+
+  const teams = await tp.getTeams<TP.TpResponse<TP.Team>>()
+  if (!teams) return null
+
+  const normalized = value.toLowerCase()
+  const exactMatch = teams.Items?.find((team) => team.Name?.toLowerCase() === normalized)
+  if (exactMatch) return String(exactMatch.Id)
+
+  const partialMatches = teams.Items?.filter((team) => team.Name?.toLowerCase().includes(normalized)) || []
+  if (partialMatches.length === 1) return String(partialMatches[0].Id)
+
+  return null
+}
+
 export async function handleCreateInternalCard(
   tp: TpClient,
   params: {
@@ -119,6 +137,11 @@ export async function handleCreateInternalCard(
   const definition = resolveInternalCardType(params.kind)
   if (!definition) return textResult(`Unknown internal card kind: ${params.kind}`)
 
+  const teamId = definition.nativeType === 'Epic' ? undefined : await resolveTeamId(tp, params.teamId)
+  if (teamId === null) {
+    return textResult(`Could not resolve Targetprocess team "${params.teamId}". Call get_teams and retry with a numeric teamId.`)
+  }
+
   const description = buildInternalCardDescription(definition, params.description, params.sections)
   let response: unknown
 
@@ -129,7 +152,7 @@ export async function handleCreateInternalCard(
         description,
         releaseId: params.releaseId,
         projectId: params.projectId,
-        customFields: params.customFields,
+        teamId,
       })
       break
     case 'Feature':
@@ -139,7 +162,7 @@ export async function handleCreateInternalCard(
         epicId: params.epicId,
         releaseId: params.releaseId,
         projectId: params.projectId,
-        teamId: params.teamId,
+        teamId,
       })
       break
     case 'UserStory':
@@ -149,7 +172,7 @@ export async function handleCreateInternalCard(
         featureId: params.featureId,
         releaseId: params.releaseId,
         projectId: params.projectId,
-        teamId: params.teamId,
+        teamId,
       })
       break
     case 'Bug':
@@ -158,7 +181,7 @@ export async function handleCreateInternalCard(
         bugContent: description || params.description || '',
         origin: params.origin,
         projectId: params.projectId,
-        teamId: params.teamId,
+        teamId,
         entityStateId: params.entityStateId,
       })
       break
@@ -168,7 +191,7 @@ export async function handleCreateInternalCard(
         description,
         releaseId: params.releaseId,
         projectId: params.projectId,
-        teamId: params.teamId,
+        teamId,
         entityStateId: params.entityStateId,
         customFields: params.customFields,
       })

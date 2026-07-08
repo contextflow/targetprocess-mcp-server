@@ -30,6 +30,7 @@ import { handleCreateBug } from "./handlers/create_bug.js";
 import { handleCreateUserStory } from "./handlers/create_user_story.js";
 import { handleCreateFeature } from "./handlers/create_feature.js";
 import { handleCreateEpic } from "./handlers/create_epic.js";
+import { handleCreateOpportunity } from "./handlers/create_opportunity.js";
 import { handleGetEpicContent } from "./handlers/get_epic_content.js";
 import { handleUpdateEpic } from "./handlers/update_epic.js";
 import { handleGetEpicFeatures } from "./handlers/get_epic_features.js";
@@ -307,6 +308,57 @@ server.registerTool('search_tp_cards', {
 )
 
 server.registerTool(
+  'create_opportunity',
+  {
+    title: 'Create Targetprocess Opportunity',
+    description: `Create an Opportunity. Use this tool whenever the user asks to create an opportunity.
+      Keep the call simple: provide title and plain content. Do not pass team IDs or custom fields.
+      ICE values are stored in the description because Opportunity custom fields vary by project.`,
+    inputSchema: {
+      title: z.string()
+        .describe('Opportunity title'),
+      summary: z.string()
+        .optional()
+        .describe('Short summary of the opportunity.'),
+      what: z.string()
+        .optional()
+        .describe('What should be done.'),
+      why: z.string()
+        .optional()
+        .describe('Why this opportunity matters.'),
+      how: z.string()
+        .optional()
+        .describe('Proposed implementation approach.'),
+      acceptanceCriteria: z.string()
+        .optional()
+        .describe('Concrete completion criteria.'),
+      iceScore: z.number()
+        .optional()
+        .describe('Optional ICE score to record in the description.'),
+      impact: z.number()
+        .optional()
+        .describe('Optional impact score to record in the description.'),
+      confidence: z.number()
+        .optional()
+        .describe('Optional confidence score to record in the description.'),
+      ease: z.number()
+        .optional()
+        .describe('Optional ease score to record in the description.'),
+      projectId: z.string()
+        .regex(/^\d+$/)
+        .optional()
+        .describe('Optional numeric Project ID. Omit unless the user explicitly gives a Targetprocess project ID.'),
+      releaseId: z.string()
+        .regex(/^\d+$/)
+        .optional()
+        .describe('Optional numeric Release ID.'),
+    },
+  },
+  async ({ title, summary, what, why, how, acceptanceCriteria, iceScore, impact, confidence, ease, projectId, releaseId }) =>
+    handleCreateOpportunity(tp, { title, summary, what, why, how, acceptanceCriteria, iceScore, impact, confidence, ease, projectId, releaseId })
+)
+
+server.registerTool(
   'get_internal_card_types',
   {
     title: 'Get internal Targetprocess card types',
@@ -359,6 +411,7 @@ server.registerTool(
   {
     title: 'Create internal Targetprocess card',
     description: `Create a Targetprocess card using organization vocabulary and structured templates.
+      For opportunities, prefer create_opportunity instead; it avoids fragile project/team/custom-field guesses.
       Supported default kinds:
       - opportunity maps to Epic
       - PCR, PRT, and CAPA map to Request
@@ -378,8 +431,9 @@ server.registerTool(
         .optional()
         .describe('Template section content keyed by section name from get_internal_card_types, e.g. what, why, how, requirement, actionPlan.'),
       projectId: z.string()
+        .regex(/^\d+$/)
         .optional()
-        .describe('Optional Project ID; defaults to TP_PROJECT_ID when the native entity requires a project.'),
+        .describe('Optional numeric Project ID; defaults to TP_PROJECT_ID when the native entity requires a project. Do not pass project names.'),
       teamId: z.string()
         .optional()
         .describe('Optional Team ID for assignable native entities.'),
@@ -404,7 +458,7 @@ server.registerTool(
         value: z.any(),
       }))
         .optional()
-        .describe('Optional Targetprocess custom fields for cards that support them, including opportunity/Epic and Request cards.'),
+        .describe('Optional Targetprocess custom fields for cards that support them. Do not use for opportunities; create_opportunity records ICE values in the description.'),
     },
   },
   async ({ kind, title, description, sections, projectId, teamId, releaseId, epicId, featureId, entityStateId, origin, customFields }) =>
@@ -1033,10 +1087,14 @@ server.registerTool(
     const userStoryResponse = await tp.createUserStory<TP.UserStory>({ title, description, featureId, releaseId, projectId, teamId });
 
     if (!userStoryResponse) {
+      const diagnostic = tp.getLastRequestDiagnostic?.()
+      const details = diagnostic
+        ? `\nError: ${diagnostic.message}\nRequest: ${diagnostic.method} ${diagnostic.url}${diagnostic.body ? `\nBody: ${diagnostic.body}` : ''}`
+        : `\n JSON: ${JSON.stringify(userStoryResponse, null, 2)}`
       return {
         content: [{
           type: 'text',
-          text: `Failed to create formatted user story "${title}"\n JSON: ${JSON.stringify(userStoryResponse, null, 2)}`
+          text: `Failed to create formatted user story "${title}"${details}`
         }]
       };
     }
@@ -1102,7 +1160,7 @@ server.registerTool(
   'create_epic',
   {
     title: 'Create a new epic',
-    description: `Create a new Epic in Targetprocess.`,
+    description: `Create a raw Targetprocess Epic. Do not use this for Opportunities; use create_opportunity instead.`,
     inputSchema: {
       title: z.string()
         .describe('Epic title'),
@@ -1115,12 +1173,17 @@ server.registerTool(
         .optional()
         .describe('Optional Release ID to link this epic to (e.g. 145200)'),
       projectId: z.string()
+        .regex(/^\d+$/)
         .optional()
-        .describe('Optional Project ID -- defaults to TP_PROJECT_ID from config'),
+        .describe('Optional numeric Project ID -- defaults to TP_PROJECT_ID from config'),
+      teamId: z.string()
+        .regex(/^\d+$/)
+        .optional()
+        .describe('Optional numeric Team ID. Omit unless you know the team is assigned to the selected project.'),
     },
   },
-  async ({ title, description, releaseId, projectId }) =>
-    handleCreateEpic(tp, { title, description, releaseId, projectId })
+  async ({ title, description, releaseId, projectId, teamId }) =>
+    handleCreateEpic(tp, { title, description, releaseId, projectId, teamId })
 )
 
 server.registerTool(

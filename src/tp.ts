@@ -33,6 +33,11 @@ function tpString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
+function nonEmpty(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
+}
+
 export function tpNativeTypeCollection(nativeType: TpNativeCardType): TpEntityCollection {
   switch (nativeType) {
     case "General": return "Generals"
@@ -628,12 +633,14 @@ export class TpClient {
   }
 
   async createUserStory<T>({ title, description, featureId, releaseId, projectId, teamId }: { title: string, description?: string, featureId?: string, releaseId?: string, projectId?: string, teamId?: string }): Promise<T> {
+    const resolvedProjectId = nonEmpty(projectId) || nonEmpty(this.projectId)
+    const resolvedTeamId = nonEmpty(teamId) || nonEmpty(this.teamId)
     const userStory: Record<string, any> = {
       "Name": title,
-      "Project": { "Id": projectId || this.projectId },
-      "assignedTeams": [{ "team": { "id": teamId || this.teamId } }],
     }
 
+    if (resolvedProjectId) userStory["Project"] = { "Id": resolvedProjectId }
+    if (resolvedTeamId) userStory["assignedTeams"] = [{ "team": { "id": resolvedTeamId } }]
     if (description) userStory["Description"] = description
     if (featureId) userStory["Feature"] = { "Id": featureId }
     if (releaseId) userStory["Release"] = { "Id": releaseId }
@@ -682,21 +689,26 @@ export class TpClient {
     description,
     releaseId,
     projectId,
+    teamId,
     customFields,
   }: {
     title: string
     description?: string
     releaseId?: string
     projectId?: string
+    teamId?: string
     customFields?: CustomFieldInput[]
   }): Promise<T | null> {
+    const resolvedProjectId = nonEmpty(projectId) || nonEmpty(this.projectId)
+    const resolvedTeamId = nonEmpty(teamId)
     const epic: Record<string, any> = {
       "Name": title,
-      "Project": { "Id": projectId || this.projectId },
     }
 
+    if (resolvedProjectId) epic["Project"] = { "Id": resolvedProjectId }
     if (description) epic["Description"] = description
     if (releaseId) epic["Release"] = { "Id": releaseId }
+    if (resolvedTeamId) epic["assignedTeams"] = [{ "team": { "id": resolvedTeamId } }]
     if (customFields && customFields.length > 0) epic["customFields"] = customFields
 
     return this.post<any, T>({

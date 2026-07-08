@@ -7,6 +7,7 @@ export async function handleCreateEpic(
     description?: string
     releaseId?: string
     projectId?: string
+    teamId?: string
   },
 ) {
   const response = await tp.createEpic(params)

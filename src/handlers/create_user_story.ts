@@ -15,10 +15,14 @@ export async function handleCreateUserStory(
   const response = await tp.createUserStory<TP.UserStory>(params)
 
   if (!response) {
+    const diagnostic = tp.getLastRequestDiagnostic?.()
+    const details = diagnostic
+      ? `\nError: ${diagnostic.message}\nRequest: ${diagnostic.method} ${diagnostic.url}${diagnostic.body ? `\nBody: ${diagnostic.body}` : ''}`
+      : `\n JSON: ${JSON.stringify(response, null, 2)}`
     return {
       content: [{
         type: 'text' as const,
-        text: `Failed to create user story "${params.title}"\n JSON: ${JSON.stringify(response, null, 2)}`
+        text: `Failed to create user story "${params.title}"${details}`
       }],
     }
   }
