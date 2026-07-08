@@ -62,9 +62,34 @@ describe('handleSearchInternalCards', () => {
     expect(parsed[0]).toMatchObject({
       kind: 'pcr',
       nativeType: 'Request',
+      collection: 'Requests',
+      addCommentSupported: true,
       id: 10,
       name: 'Resolve: PDF report issue',
       description: 'Why',
+    })
+  })
+
+  it('falls back from full phrase searches to meaningful terms', async () => {
+    vi.mocked(mockTp.searchContainsNameText).mockResolvedValue({ Items: [] } as any)
+    vi.mocked(mockTp.searchContainsDescriptionText).mockImplementation(async ({ text }) => ({
+      Items: text === 'mcp'
+        ? [{ Id: 67318, Name: 'Deploy and document the TargetProcess MCP for others', Description: '<div>TargetProcess MCP</div>' }]
+        : [],
+    }) as any)
+
+    const result = await handleSearchInternalCards(mockTp, { keyword: 'target process mcp', kind: 'opportunity' })
+    const parsed = JSON.parse(result.content[0].text)
+
+    expect(mockTp.searchContainsDescriptionText).toHaveBeenCalledWith(expect.objectContaining({
+      text: 'mcp',
+      entityType: 'Epics',
+    }))
+    expect(parsed[0]).toMatchObject({
+      id: 67318,
+      nativeType: 'Epic',
+      collection: 'Epics',
+      addCommentSupported: true,
     })
   })
 

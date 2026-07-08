@@ -58,22 +58,27 @@ export async function handleSearchInternalCards(
   }
 
   const itemByKey = new Map<string, { card: MinimalCard; definition: InternalCardTypeDefinition }>()
+  const terms = searchTerms(params.keyword)
 
   for (const definition of definitions) {
     const entityType = tpNativeTypeCollection(definition.nativeType)
-    const [nameResult, descriptionResult] = await Promise.all([
-      tp.searchContainsNameText<TP.TpResponse<MinimalCard>>({ text: params.keyword, entityType, take }),
-      tp.searchContainsDescriptionText<TP.TpResponse<MinimalCard>>({ text: params.keyword, entityType, take }),
-    ])
+    for (const term of terms) {
+      const [nameResult, descriptionResult] = await Promise.all([
+        tp.searchContainsNameText<TP.TpResponse<MinimalCard>>({ text: term, entityType, take }),
+        tp.searchContainsDescriptionText<TP.TpResponse<MinimalCard>>({ text: term, entityType, take }),
+      ])
 
-    for (const card of [...(nameResult?.Items ?? []), ...(descriptionResult?.Items ?? [])]) {
-      if (card.Id === undefined) continue
-      itemByKey.set(`${definition.nativeType}:${card.Id}`, { card, definition })
+      for (const card of [...(nameResult?.Items ?? []), ...(descriptionResult?.Items ?? [])]) {
+        if (card.Id === undefined) continue
+        itemByKey.set(`${definition.nativeType}:${card.Id}`, { card, definition })
+      }
     }
   }
 
   const baseUrl = getClientBaseUrl(tp)
-  const items = [...itemByKey.values()].map(({ card, definition }) => normalizeCard(card, definition, baseUrl))
+  const items = [...itemByKey.values()]
+    .map(({ card, definition }) => normalizeCard(card, definition, baseUrl, params.keyword))
+    .sort((left, right) => right.searchScore - left.searchScore || String(left.name || '').localeCompare(String(right.name || '')))
   if (items.length === 0) {
     return textResult(`No internal cards found for keyword: "${params.keyword}"`)
   }
@@ -251,6 +256,7 @@ function definitionsForSearch(kind?: string): InternalCardTypeDefinition[] {
   const seen = new Set<string>()
   const definitions: InternalCardTypeDefinition[] = []
   for (const definition of Object.values(getInternalCardTypes())) {
+    if (definition.nativeType === 'General') continue
     const key = `${definition.kind}:${definition.nativeType}`
     if (seen.has(key)) continue
     seen.add(key)
@@ -259,17 +265,32 @@ function definitionsForSearch(kind?: string): InternalCardTypeDefinition[] {
   return definitions
 }
 
-function normalizeCard(card: MinimalCard, definition: InternalCardTypeDefinition, baseUrl: string) {
+function searchTerms(keyword: string): string[] {
+  const normalized = keyword.trim()
+  const compactTargetprocess = normalized.replace(/\btarget\s+process\b/gi, 'targetprocess')
+  const spacedTargetprocess = normalized.replace(/\btargetprocess\b/gi, 'target process')
+  const tokens = normalized
+    .split(/[^a-z0-9]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3)
+  return [...new Set([normalized, compactTargetprocess, spacedTargetprocess, ...tokens].filter(Boolean))]
+}
+
+function normalizeCard(card: MinimalCard, definition: InternalCardTypeDefinition, baseUrl: string, keyword = '') {
   const inferredKind = inferInternalCardKind(definition.nativeType, card) ?? definition.kind
   const id = card.Id
+  const collection = tpNativeTypeCollection(definition.nativeType)
+  const plainDescription = htmlToText(card.Description || '')
 
   return {
     kind: inferredKind,
     label: getInternalCardTypes()[inferredKind as InternalCardKind]?.label ?? definition.label,
     nativeType: definition.nativeType,
+    collection,
+    addCommentSupported: true,
     id,
     name: card.Name,
-    description: htmlToText(card.Description || ''),
+    description: plainDescription,
     url: id === undefined || !baseUrl ? undefined : `${baseUrl}/entity/${id}`,
     entityState: card.EntityState?.Name,
     project: card.Project?.Name,
@@ -285,7 +306,24 @@ function normalizeCard(card: MinimalCard, definition: InternalCardTypeDefinition
     userStory: card.UserStory?.Name,
     userStoryId: card.UserStory?.Id,
     customFields: card.CustomFields ?? [],
+    searchScore: searchScore(keyword, card.Name || '', plainDescription),
   }
+}
+
+function searchScore(keyword: string, name: string, description: string): number {
+  const normalizedKeyword = keyword.toLowerCase().replace(/\s+/g, ' ').trim()
+  const normalizedName = name.toLowerCase()
+  const normalizedDescription = description.toLowerCase()
+  const tokens = searchTerms(keyword).map((term) => term.toLowerCase())
+  let score = 0
+  if (normalizedName === normalizedKeyword) score += 100
+  if (normalizedName.includes(normalizedKeyword)) score += 60
+  if (normalizedDescription.includes(normalizedKeyword)) score += 20
+  for (const token of tokens) {
+    if (normalizedName.includes(token)) score += 10
+    if (normalizedDescription.includes(token)) score += 2
+  }
+  return score
 }
 
 function buildInternalCardDescription(
