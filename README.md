@@ -50,12 +50,18 @@ User Stories
 
 Tasks
 - `get_in_progress_tasks_and_bugs` — Get all Tasks and Bugs currently in "In Progress" state assigned to a given user (userId)
-- `create_task` — Create a new task linked to a user story (title, userStoryId, optional description)
+- `create_task` — Create a new task linked to a user story (title, userStoryId, optional description/projectId/teamId/entityStateId)
+> [!NOTE]
+> `projectId` and `teamId` are optional — by default they are derived from the linked user story, then fall back to `TP_PROJECT_ID` and `TP_TEAM_ID` from config
 - `list_my_user_stories` — List User Stories assigned to the current user, optionally filtered by state (optional state, optional take, optional skip)
 - `list_my_bugs` — List Bugs assigned to the current user, optionally filtered by state (optional state, optional take, optional skip)
 
 Cards — Read
+- `get_internal_card_types` — List configured internal organization card kinds and their native Targetprocess mappings
+- `search_internal_cards` — Search organization card kinds such as Opportunity, PCR, PRT, CAPA, SSR, software story, or bug (keyword, optional kind, optional take)
+- `get_internal_card` — Fetch a card by internal kind and ID, normalized across native TP entities (id, kind)
 - `get_card_current_status` — Get EntityState, TeamState, and assigned teams for a card (id, optional resourceType: UserStory | Bug | Feature, default: UserStory)
+- `get_feature_content` — Fetch full content of a feature by ID (id)
 - `get_bug_content` — Fetch full content of a bug by ID (id)
 - `get_user_story_content` — Fetch full content of a user story by ID (id)
 - `get_bug_comments` — Get comments on a bug (id, optional results)
@@ -66,8 +72,12 @@ Cards — Read
 - `search_tp_cards` — Search TP cards by keyword or phrase in description (keyword, optional entityType: UserStories | Bugs, default: UserStories)
 
 Cards — Write
+- `create_internal_card` — Create a card using internal organization vocabulary and structured templates (kind, title, optional description/sections/projectId/teamId/releaseId/epicId/featureId/entityStateId/customFields)
 - `add_comment` — Post a comment to any card (id, comment)
 - `add_comment_with_user` — Post a comment to any card and mention a specific user (id, comment, user object from `get_users`)
+- `add_card_labels` — Add native Targetprocess labels/tags to any card through the card `Tags` field (id, labels, optional nativeType)
+- `add_file_attachment` — Upload a file attachment to any card (id, fileName, fileContentBase64)
+- `delete_internal_card` — Delete a card by internal organization kind (id, kind; use kind `opportunity` for Opportunity cards stored as native Epics)
 - `update_bug` — Update an existing bug (id, optional title, optional bugContent, optional origin, optional projectId, optional teamId, optional entityStateId)
   > Resolve state name → ID via `get_bug_workflows` before passing `entityStateId`
 - `update_user_story` — Update an existing user story (id, optional title, optional description, optional projectId, optional teamId, optional entityStateId)
@@ -141,7 +151,53 @@ Developer Tools
 
 ---
 
+## Internal Card Types
+
+The server includes a configurable organization vocabulary layer on top of native Targetprocess entities:
+
+- `opportunity` -> `Epic`
+- `pcr` -> `Request`
+- `prt` -> `Request`
+- `capa` -> `Request`
+- `ssr` -> `Feature`
+- `software_story` -> `UserStory`
+- `bug` -> `Bug`
+
+Use `get_internal_card_types` to inspect the active mapping and template section keys. Override defaults with `TP_INTERNAL_CARD_TYPES_JSON`, for example:
+
+```bash
+TP_INTERNAL_CARD_TYPES_JSON='{"pcr":{"nativeType":"Request","aliases":["change request"]}}'
+```
+
+The override is merged with defaults, so teams can adjust aliases, title prefixes, native type mappings, and template sections without code changes.
+
+---
+
 ## Installation
+### Nix Flake With Sandboxed Runtime
+
+The flake default app runs the server in a platform sandbox. On Linux it uses [jail.nix](https://git.sr.ht/~alexdavid/jail.nix) with bubblewrap. On macOS it uses the built-in Seatbelt sandbox through `/usr/bin/sandbox-exec`. The sandboxed runtime does not grant direct network access to Node; it routes HTTPS through a host-side tinyproxy instance that only allows the exact host from `TP_BASE_URL` on port 443. The proxy is exposed to the sandbox through a private Unix socket directory.
+
+```bash
+TP_BASE_URL=https://your-instance.tpondemand.com \
+TP_TOKEN=<your-tp-token> \
+nix run path:/home/pl/static/software/targetprocess-mcp-server
+```
+
+For the sandboxed runtime, `TP_BASE_URL` must be a simple HTTPS URL with no credentials, query string, fragment, or explicit port. Use `nix run .#unjailed` only when you intentionally want to run without the OS sandbox and tinyproxy egress restriction.
+
+The generic MCP config template is in `examples/targetprocess.mcp.json`.
+Detailed setup notes for Codex, password-manager-backed tokens, and startup troubleshooting are in `docs/targetprocess-setup.md`.
+
+To rediscover or change the remaining values, start with `TP_BASE_URL` and `TP_TOKEN`, then use:
+
+- `get_logged_in_user` for `TP_OWNER_ID`
+- `get_projects` for `TP_PROJECT_ID`
+- `get_teams` for `TP_TEAM_ID`
+- `get_processes` for `TP_PROCESS_ID`
+
+`TP_USER_STORY_WORKFLOW_ID` and `TP_BUG_WORKFLOW_ID` are currently loaded for compatibility but are not used by the server.
+
 ### Local Installation for Development
 ```json
 {
@@ -214,7 +270,7 @@ npx vitest            # watch mode
 
 ### Coverage
 
-**33 of 46 tools (72%) are covered by unit tests.**
+**36 of 64 tools (56%) are covered by unit tests.**
 
 | Test file | Handlers covered |
 |---|---|
@@ -228,6 +284,8 @@ npx vitest            # watch mode
 | `release_tools.test.ts` | `get_release_user_stories`, `get_release_bugs`, `get_release_features`, `get_release_open_bugs`, `get_release_open_user_stories` |
 | `user_team_tools.test.ts` | `get_users`, `get_teams`, `get_teams_and_team_assignments` |
 | `comment_tools.test.ts` | `add_comment`, `get_user_story_comments`, `get_bug_comments` |
+| `card_metadata_tools.test.ts` | `add_card_labels`, `add_file_attachment` |
+| `internal_cards.test.ts` | `get_internal_card_types`, `search_internal_cards`, `get_internal_card`, `create_internal_card`, `delete_internal_card` |
 | `creation_tools.test.ts` | `create_bug`, `create_user_story`, `create_feature`, `create_task`, `update_bug`, `update_user_story_state` |
 | `my_work_tools.test.ts` | `get_in_progress_tasks_and_bugs`, `list_my_user_stories`, `list_my_bugs`, `log_time`, `get_my_time_logs` |
 | `entity_tools.test.ts` | `get_feature_user_stories`, `get_user_story_bugs`, `get_card_current_status` |

@@ -1,15 +1,112 @@
-import { readFileSync } from "fs";
-import { basename } from "path";
-import { TpClientParameters, TpResponse, TpResult, Relation, BugInputSchema, Bug, Task, LoggedUser } from "./types.js";
+import { TpClientParameters, TpResponse, TpResult, Relation, BugInputSchema, Bug, Task, LoggedUser, CreateTaskInputSchema, CardStatus, TpResponseV2, CustomFieldInput, TpEntityCollection, TpNativeCardType } from "./types.js";
 import { config } from "./config.js";
+import { ProxyAgent, type Dispatcher } from "undici";
+
+type TpFetchInit = RequestInit
+
+export type TpRequestDiagnostic = {
+  method: string
+  url: string
+  message: string
+  status?: number
+  body?: string
+}
+
+function tpString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+export function tpNativeTypeCollection(nativeType: TpNativeCardType): TpEntityCollection {
+  switch (nativeType) {
+    case "General": return "Generals"
+    case "UserStory": return "UserStories"
+    case "Bug": return "Bugs"
+    case "Feature": return "Features"
+    case "Epic": return "Epics"
+    case "Request": return "Requests"
+  }
+}
+
+function normalizedBaseUrl(baseUrl: string): URL {
+  const parsed = new URL(baseUrl)
+  if (parsed.protocol !== "https:") {
+    throw new Error("TP_BASE_URL must use https://")
+  }
+  if (parsed.port && parsed.port !== "443") {
+    throw new Error("TP_BASE_URL must use the default HTTPS port 443")
+  }
+  parsed.pathname = parsed.pathname.replace(/\/$/, "")
+  parsed.search = ""
+  parsed.hash = ""
+  return parsed
+}
+
+function appendPath(url: URL, segments: string[], trailingSlash: boolean): URL {
+  const basePath = url.pathname.replace(/\/$/, "")
+  const encodedSegments = segments
+    .filter((segment) => segment.length > 0)
+    .map((segment) => encodeURIComponent(segment))
+  url.pathname = [basePath, ...encodedSegments].filter(Boolean).join("/") + (trailingSlash ? "/" : "")
+  return url
+}
+
+export function assertTargetprocessUrlAllowed(baseUrl: string, url: URL): void {
+  const base = normalizedBaseUrl(baseUrl)
+  if (url.protocol !== "https:" || url.origin !== base.origin) {
+    throw new Error(`Refusing outbound request to non-Targetprocess origin: ${url.origin}`)
+  }
+}
+
+export function buildTargetprocessUrl(
+  baseUrl: string,
+  pathSegments: string[],
+  query: Record<string, string | number>,
+  options: { trailingSlash?: boolean } = {},
+): string {
+  const url = appendPath(normalizedBaseUrl(baseUrl), pathSegments, options.trailingSlash ?? true)
+  for (const [key, value] of Object.entries(query)) {
+    url.searchParams.set(key, String(value))
+  }
+  assertTargetprocessUrlAllowed(baseUrl, url)
+  return url.toString()
+}
+
+export function buildTpUrl(baseUrl: string, params: TpClientParameters): string {
+  const apiVersionSegments = (params.apiVersion || "/api/v1")
+    .split("/")
+    .filter(Boolean)
+  return buildTargetprocessUrl(baseUrl, [...apiVersionSegments, ...params.pathParam], params.param)
+}
+
+export function createTpDispatcher(proxySocket: string): Dispatcher | undefined {
+  if (!proxySocket) return undefined
+
+  return new ProxyAgent({
+    uri: "http://targetprocess-mcp-proxy",
+    proxyTls: {
+      socketPath: proxySocket,
+    },
+  })
+}
+
+export function buildTpFetchInit(init: TpFetchInit, dispatcher?: Dispatcher): TpFetchInit {
+  return {
+    ...init,
+    redirect: "error",
+    ...(dispatcher ? { dispatcher } : {}),
+  }
+}
 
 export class TpClient {
 
   private baseUrl: string = config.tp.url
   private token: string = config.tp.token
-  private headers: HeadersInit
-  private readonly v1 = '/api/v1'
+  private headers: Record<string, string>
+  private dispatcher: Dispatcher | undefined = createTpDispatcher(config.tp.proxySocket)
+  private loggedInOwnerId: string | undefined
+  private lastRequestDiagnostic: TpRequestDiagnostic | undefined
   private readonly v2 = '/api/v2'
+  private readonly debugHttp = process.env.TP_DEBUG_HTTP === "1"
 
   constructor() {
     this.headers = {
@@ -19,16 +116,88 @@ export class TpClient {
   }
 
   private params(params: TpClientParameters): string {
-    let _url = this.baseUrl + (params.apiVersion || this.v1)
-    for (const segment of params.pathParam) {
-      _url += `/${segment}`
+    return buildTpUrl(this.baseUrl, params)
+  }
+
+  private redactUrl(url: string): string {
+    try {
+      const parsed = new URL(url)
+      if (parsed.searchParams.has("access_token")) {
+        parsed.searchParams.set("access_token", "***")
+      }
+      return parsed.toString()
+    } catch {
+      const redacted = url.replace(/access_token=[^&\s]*/g, "access_token=***")
+      return this.token ? redacted.replaceAll(this.token, "***") : redacted
+    }
+  }
+
+  private debug(label: string, value: unknown): void {
+    if (this.debugHttp) {
+      console.error(JSON.stringify({ [label]: value }))
+    }
+  }
+
+  protected async fetch(url: string, init: TpFetchInit) {
+    return fetch(url, buildTpFetchInit(init, this.dispatcher))
+  }
+
+  getLastRequestDiagnostic(): TpRequestDiagnostic | undefined {
+    return this.lastRequestDiagnostic
+  }
+
+  private clearRequestDiagnostic(): void {
+    this.lastRequestDiagnostic = undefined
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+  }
+
+  private truncate(text: string, maxLength = 1000): string {
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+  }
+
+  private redactText(text: string): string {
+    const withoutQueryToken = text.replace(/access_token=[^&\s"]*/g, "access_token=***")
+    return this.token ? withoutQueryToken.replaceAll(this.token, "***") : withoutQueryToken
+  }
+
+  private recordRequestDiagnostic({
+    method,
+    url,
+    message,
+    status,
+    body,
+  }: {
+    method: string
+    url: string
+    message: string
+    status?: number
+    body?: string
+  }): void {
+    this.lastRequestDiagnostic = {
+      method,
+      url: this.redactUrl(url),
+      message: this.redactText(message),
+      ...(status !== undefined ? { status } : {}),
+      ...(body ? { body: this.truncate(this.redactText(body)) } : {}),
+    }
+  }
+
+  private async ownerId(): Promise<string | null> {
+    if (config.tp.ownerId) return config.tp.ownerId
+    if (this.loggedInOwnerId) return this.loggedInOwnerId
+
+    const context = await this.getContext<{ LoggedUser?: { Id?: string | number } }>()
+    const id = context?.LoggedUser?.Id
+    if (id === undefined || id === null || id === "") {
+      console.error("Unable to resolve Targetprocess logged-in user ID")
+      return null
     }
 
-    let _urlParams = []
-    for (const [key, value] of Object.entries(params.param)) {
-      _urlParams.push(`${key}=${encodeURIComponent(value)}`)
-    }
-    return _url + "/?" + _urlParams.join("&")
+    this.loggedInOwnerId = String(id)
+    return this.loggedInOwnerId
   }
 
   // @ts-ignore
@@ -53,19 +222,61 @@ export class TpClient {
   private async get<T>(params: TpClientParameters): Promise<T | null> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
+    this.clearRequestDiagnostic()
+    if (!this.token) {
+      this.recordRequestDiagnostic({
+        method: "GET",
+        url: _url,
+        message: "TP_TOKEN is required",
+      })
+      console.error("Error making TP request:", "TP_TOKEN is required");
+      console.error("Request URL:", this.redactUrl(_url));
+      return null
+    }
+
     try {
-      const response = await fetch(_url, {
+      const response = await this.fetch(_url, {
         method: "GET",
         headers: this.headers
       });
+      const text = await response.text()
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        this.recordRequestDiagnostic({
+          method: "GET",
+          url: _url,
+          message: `HTTP error! status: ${response.status}`,
+          status: response.status,
+          body: text,
+        })
+        const diagnostic = this.getLastRequestDiagnostic()
+        console.error("Error making TP request:", diagnostic?.message);
+        console.error("Request URL:", diagnostic?.url);
+        return null
       }
 
-      return (await response.json()) as T
+      try {
+        return (text ? JSON.parse(text) : null) as T
+      } catch (error) {
+        this.recordRequestDiagnostic({
+          method: "GET",
+          url: _url,
+          message: `Failed to parse Targetprocess JSON response: ${this.errorMessage(error)}`,
+          status: response.status,
+          body: text,
+        })
+        const diagnostic = this.getLastRequestDiagnostic()
+        console.error("Error parsing TP response:", error);
+        console.error("Request URL:", diagnostic?.url);
+        return null
+      }
     } catch (error) {
+      this.recordRequestDiagnostic({
+        method: "GET",
+        url: _url,
+        message: this.errorMessage(error),
+      })
       console.error("Error making TP request:", error);
-      console.error("Request URL:", _url);
+      console.error("Request URL:", this.redactUrl(_url));
       return null;
     }
   }
@@ -73,19 +284,62 @@ export class TpClient {
   private async post<T, U>(params: TpClientParameters, data: T): Promise<U | null> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
-    console.error(JSON.stringify({ "TP_POST_URL": _url }))
-    console.error(JSON.stringify({ "TP_POST_BODY": data }))
+    this.clearRequestDiagnostic()
+    this.debug("TP_POST_URL", this.redactUrl(_url))
+    this.debug("TP_POST_BODY", data)
+    if (!this.token) {
+      this.recordRequestDiagnostic({
+        method: "POST",
+        url: _url,
+        message: "TP_TOKEN is required",
+      })
+      console.error("Error making TP request:", "TP_TOKEN is required");
+      console.error("Request URL:", this.redactUrl(_url));
+      return null
+    }
+
     try {
-      const response = await fetch(_url, {
+      const response = await this.fetch(_url, {
         method: "POST",
         headers: this.headers,
         body: JSON.stringify(data),
       });
+      const text = await response.text()
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        this.recordRequestDiagnostic({
+          method: "POST",
+          url: _url,
+          message: `HTTP error! status: ${response.status}`,
+          status: response.status,
+          body: text,
+        })
+        const diagnostic = this.getLastRequestDiagnostic()
+        console.error("Error making TP request:", diagnostic?.message);
+        console.error("Request URL:", diagnostic?.url);
+        return null
       }
-      return (await response.json()) as U
+
+      try {
+        return (text ? JSON.parse(text) : null) as U
+      } catch (error) {
+        this.recordRequestDiagnostic({
+          method: "POST",
+          url: _url,
+          message: `Failed to parse Targetprocess JSON response: ${this.errorMessage(error)}`,
+          status: response.status,
+          body: text,
+        })
+        const diagnostic = this.getLastRequestDiagnostic()
+        console.error("Error parsing TP response:", error);
+        console.error("Request URL:", diagnostic?.url);
+        return null
+      }
     } catch (error) {
+      this.recordRequestDiagnostic({
+        method: "POST",
+        url: _url,
+        message: this.errorMessage(error),
+      })
       console.error("Error making TP request:", error);
       return null;
     }
@@ -96,17 +350,17 @@ export class TpClient {
   private async postRaw<T, U>(params: TpClientParameters, data: T): Promise<TpResult<U>> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
-    console.error(JSON.stringify({ "TP_POST_URL": _url }))
-    console.error(JSON.stringify({ "TP_POST_BODY": data }))
+    this.debug("TP_POST_URL", this.redactUrl(_url))
+    this.debug("TP_POST_BODY", data)
     try {
-      const response = await fetch(_url, {
+      const response = await this.fetch(_url, {
         method: "POST",
         headers: this.headers,
         body: JSON.stringify(data),
       });
       const text = await response.text()
       if (!response.ok) {
-        console.error(JSON.stringify({ "TP_POST_ERROR_STATUS": response.status, "TP_POST_ERROR_BODY": text }))
+        this.debug("TP_POST_ERROR", { status: response.status, body: text })
         return { ok: false, status: response.status, body: text }
       }
       return { ok: true, data: (text ? JSON.parse(text) : null) as U }
@@ -121,15 +375,15 @@ export class TpClient {
   private async del<U>(params: TpClientParameters): Promise<TpResult<U>> {
     params.param["access_token"] = this.token
     let _url = this.params(params)
-    console.error(JSON.stringify({ "TP_DELETE_URL": _url }))
+    this.debug("TP_DELETE_URL", this.redactUrl(_url))
     try {
-      const response = await fetch(_url, {
+      const response = await this.fetch(_url, {
         method: "DELETE",
         headers: this.headers,
       });
       const text = await response.text()
       if (!response.ok) {
-        console.error(JSON.stringify({ "TP_DELETE_ERROR_STATUS": response.status, "TP_DELETE_ERROR_BODY": text }))
+        this.debug("TP_DELETE_ERROR", { status: response.status, body: text })
         return { ok: false, status: response.status, body: text }
       }
       return { ok: true, data: (text ? JSON.parse(text) : null) as U }
@@ -164,6 +418,20 @@ export class TpClient {
     }) as T
 
     return response
+  }
+
+  async getRequest<T>(requestId: string): Promise<T> {
+    return this.get<T>({
+      pathParam: ["Requests", requestId],
+      param: { "format": "json" },
+    }) as T
+  }
+
+  async getInternalCard<T>(nativeType: TpNativeCardType, cardId: string): Promise<T> {
+    return this.get<T>({
+      pathParam: [tpNativeTypeCollection(nativeType), cardId],
+      param: { "format": "json" },
+    }) as T
   }
 
   async createBug<T>({ title, card, bugContent, origin = "Manual QA", projectId, teamId }: { title: string, card: { id: string, type: "UserStory" | "Bug" | "Feature" }, bugContent: string, origin?: string, projectId?: string, teamId?: string }): Promise<T> {
@@ -344,7 +612,19 @@ export class TpClient {
     }) as T
   }
 
-  async createEpic<T>({ title, description, releaseId, projectId }: { title: string, description?: string, releaseId?: string, projectId?: string }): Promise<T | null> {
+  async createEpic<T>({
+    title,
+    description,
+    releaseId,
+    projectId,
+    customFields,
+  }: {
+    title: string
+    description?: string
+    releaseId?: string
+    projectId?: string
+    customFields?: CustomFieldInput[]
+  }): Promise<T | null> {
     const epic: Record<string, any> = {
       "Name": title,
       "Project": { "Id": projectId || config.tp.projectId },
@@ -352,6 +632,7 @@ export class TpClient {
 
     if (description) epic["Description"] = description
     if (releaseId) epic["Release"] = { "Id": releaseId }
+    if (customFields && customFields.length > 0) epic["customFields"] = customFields
 
     return this.post<any, T>({
       pathParam: ["Epics"],
@@ -374,6 +655,40 @@ export class TpClient {
       pathParam: ["Features"],
       param: { "format": "json" },
     }, feature) as T
+  }
+
+  async createRequest<T>({
+    title,
+    description,
+    releaseId,
+    projectId,
+    teamId,
+    entityStateId,
+    customFields,
+  }: {
+    title: string
+    description?: string
+    releaseId?: string
+    projectId?: string
+    teamId?: string
+    entityStateId?: string
+    customFields?: CustomFieldInput[]
+  }): Promise<T> {
+    const request: Record<string, any> = {
+      "Name": title,
+      "Project": { "Id": projectId || config.tp.projectId },
+    }
+
+    if (description) request["Description"] = description
+    if (releaseId) request["Release"] = { "Id": releaseId }
+    if (teamId) request["assignedTeams"] = [{ "team": { "id": teamId } }]
+    if (entityStateId) request["EntityState"] = { "Id": entityStateId }
+    if (customFields && customFields.length > 0) request["customFields"] = customFields
+
+    return this.post<any, T>({
+      pathParam: ["Requests"],
+      param: { "format": "json" },
+    }, request) as T
   }
 
   async createBugBasedOnUserStory<T>(title: string, userStoryId: string, bugContent: string): Promise<T> {
@@ -470,7 +785,7 @@ export class TpClient {
     }) as T
   }
 
-  async addCommentWithUser<T>(userStoryId: string, comment: string, user: LoggedUser): Promise<T> {
+  async addCommentWithUser<T>(cardId: string, comment: string, user: LoggedUser): Promise<TpResult<T | null>> {
     const userAt = user ? `cc - <div>@user:${user.Email}[${user.FirstName} ${user.LastName}]&nbsp;</div>` : ''
     const commentContent = `${comment}\nn${userAt}`
     const commentData = {
@@ -479,31 +794,31 @@ export class TpClient {
         id: config.tp.ownerId
       },
       general: {
-        id: userStoryId,
+        id: cardId,
       },
     }
 
-    return this.post<any, T>({
+    return this.postRaw<any, T | null>({
       pathParam: ["comments"],
       param: { "format": "json" },
-    }, commentData) as T
+    }, commentData)
   }
 
-  async addComment<T>(userStoryId: string, comment: string): Promise<T> {
+  async addComment<T>(cardId: string, comment: string): Promise<TpResult<T | null>> {
     const commentData = {
       description: comment,
       owner: {
         id: config.tp.ownerId
       },
       general: {
-        id: userStoryId,
+        id: cardId,
       },
     }
 
-    return this.post<any, T>({
+    return this.postRaw<any, T | null>({
       pathParam: ["comments"],
       param: { "format": "json" },
-    }, commentData) as T
+    }, commentData)
   }
 
   async addTestStep<T>(testCaseId: string, testStep: { description: string, result: string }): Promise<T> {
@@ -543,25 +858,26 @@ export class TpClient {
     return response
   }
 
-  async searchContainsNameText<T>({ text, entityType }: { text: string, entityType: "Generals" | "UserStories" | "Bugs" | "Features" }): Promise<T> {
+  async searchContainsNameText<T>({ text, entityType, take = 25 }: { text: string, entityType: TpEntityCollection, take?: number }): Promise<T> {
     return this.get<T>({
       pathParam: [entityType],
       param: {
         "format": "json",
-        "take": "25",
-        "where": `Name contains '${text}'`,
-        "include": "[Name, Description, Id]"
+        "take": take,
+        "where": `Name contains ${tpString(text)}`,
+        "include": "[Name, Description, Id, EntityState[Name], Project[Name], CustomFields]"
       },
     }) as T
   }
 
-  async searchContainsDescriptionText<T>({ text, entityType }: { text: string, entityType: "Generals" | "UserStories" | "Bugs" | "Features" }): Promise<T> {
+  async searchContainsDescriptionText<T>({ text, entityType, take = 50 }: { text: string, entityType: TpEntityCollection, take?: number }): Promise<T> {
     return this.get<T>({
       pathParam: [entityType],
       param: {
-        "where": `Description contains '${text}' and EntityState.Name eq 'Done'`,
+        "where": `Description contains ${tpString(text)}`,
         "format": "json",
-        "take": "50",
+        "take": take,
+        "include": "[Name, Description, Id, EntityState[Name], Project[Name], CustomFields]",
       },
     }) as T
   }
@@ -583,7 +899,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}'`,
+        "where": `Release.Name eq ${tpString(name)}`,
         "include": includeFilter,
       }
     }) as T
@@ -596,7 +912,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}' and EntityState.Name ne 'Closed' and EntityState.Name ne 'Done' and EntityState.Name ne 'Passed Dev01  QA' and EntityState.Name ne 'Ready to Deploy to prod'`,
+        "where": `Release.Name eq ${tpString(name)} and EntityState.Name ne 'Closed' and EntityState.Name ne 'Done' and EntityState.Name ne 'Passed Dev01  QA' and EntityState.Name ne 'Ready to Deploy to prod'`,
         "include": includeFilter,
       }
     }) as T
@@ -609,7 +925,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}' and EntityState.Name ne 'Closed' and EntityState.Name ne 'Done' and EntityState.Name ne 'Passed Dev01  QA' and EntityState.Name ne 'Ready to Deploy to prod'`,
+        "where": `Release.Name eq ${tpString(name)} and EntityState.Name ne 'Closed' and EntityState.Name ne 'Done' and EntityState.Name ne 'Passed Dev01  QA' and EntityState.Name ne 'Ready to Deploy to prod'`,
         "include": includeFilter,
       }
     }) as T
@@ -622,7 +938,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}'`,
+        "where": `Release.Name eq ${tpString(name)}`,
         "include": includeFilter,
       }
     }) as T
@@ -635,7 +951,7 @@ export class TpClient {
       param: {
         "format": "json",
         "take": results,
-        "where": `Release.Name eq '${name}'`,
+        "where": `Release.Name eq ${tpString(name)}`,
         "include": includeFilter,
       }
     }) as T
@@ -863,11 +1179,24 @@ export class TpClient {
     return response
   }
 
-  async createTask<T>({ title, description, userStoryId }: { title: string, description?: string, userStoryId: string }): Promise<T> {
+  async createTask<T>({
+    title,
+    description,
+    userStoryId,
+    projectId,
+    teamId,
+    entityStateId,
+  }: CreateTaskInputSchema): Promise<T> {
+    const cardStatusResponse = await this.getCardStatus<TpResponseV2<CardStatus>>(userStoryId, "UserStory")
+    const cardStatus = cardStatusResponse?.items?.[0]
+    const inheritedProjectId = projectId || String(cardStatus?.project?.id || config.tp.projectId)
+    const inheritedTeamId = teamId
+      || String(cardStatus?.teamState?.team?.id || cardStatus?.teams?.[0]?.id || config.tp.teamId)
+
     const task: Record<string, any> = {
       "Name": title,
       "Project": {
-        "Id": config.tp.projectId
+        "Id": inheritedProjectId
       },
       "UserStory": {
         "Id": userStoryId
@@ -876,6 +1205,16 @@ export class TpClient {
 
     if (description) {
       task["Description"] = description
+    }
+    if (inheritedTeamId) {
+      task["assignedTeams"] = [{
+        "team": {
+          "id": inheritedTeamId
+        }
+      }]
+    }
+    if (entityStateId) {
+      task["EntityState"] = { "Id": entityStateId }
     }
 
     return this.post<any, T>({
@@ -897,11 +1236,14 @@ export class TpClient {
     description?: string
     date?: string
   }): Promise<T> {
+    const ownerId = await this.ownerId()
+    if (!ownerId) return null as T
+
     const timestamp = date ? new Date(date).getTime() : Date.now()
     const body: Record<string, any> = {
       Spent: hours,
       Date: `/Date(${timestamp})/`,
-      User: { Id: config.tp.ownerId },
+      User: { Id: ownerId },
       Assignable: { Id: entityId, ResourceType: entityType },
     }
     if (description) body["Description"] = description
@@ -913,11 +1255,14 @@ export class TpClient {
   }
 
   async getMyTimeLogs<T>(take: number = 25): Promise<T> {
+    const ownerId = await this.ownerId()
+    if (!ownerId) return null as T
+
     return this.get<T>({
       pathParam: ["Times"],
       param: {
         "format": "json",
-        "where": `User.Id eq ${config.tp.ownerId}`,
+        "where": `User.Id eq ${ownerId}`,
         "include": "[Id,Spent,Date,Description,Assignable[Id,Name,ResourceType]]",
         "orderByDesc": "Date",
         "take": take,
@@ -926,8 +1271,11 @@ export class TpClient {
   }
 
   async getMyUserStories<T>({ state, take = 25, skip = 0 }: { state?: string, take?: number, skip?: number }): Promise<T> {
-    const whereParts = [`AssignedUser.Id eq ${config.tp.ownerId}`]
-    if (state) whereParts.push(`EntityState.Name contains '${state}'`)
+    const ownerId = await this.ownerId()
+    if (!ownerId) return null as T
+
+    const whereParts = [`AssignedUser.Id eq ${ownerId}`]
+    if (state) whereParts.push(`EntityState.Name contains ${tpString(state)}`)
 
     return this.get<T>({
       pathParam: ["UserStories"],
@@ -943,8 +1291,11 @@ export class TpClient {
   }
 
   async getMyBugs<T>({ state, take = 25, skip = 0 }: { state?: string, take?: number, skip?: number }): Promise<T> {
-    const whereParts = [`AssignedUser.Id eq ${config.tp.ownerId}`]
-    if (state) whereParts.push(`EntityState.Name contains '${state}'`)
+    const ownerId = await this.ownerId()
+    if (!ownerId) return null as T
+
+    const whereParts = [`AssignedUser.Id eq ${ownerId}`]
+    if (state) whereParts.push(`EntityState.Name contains ${tpString(state)}`)
 
     return this.get<T>({
       pathParam: ["Bugs"],
@@ -1012,27 +1363,63 @@ export class TpClient {
     })
   }
 
-  async addAttachedFile(generalId: string, source: { filePath: string } | { fileContent: string; fileName: string }): Promise<string | null> {
-    let blob: Blob
-    let fileName: string
+  async deleteCard<T>({
+    cardId,
+    nativeType,
+  }: {
+    cardId: string
+    nativeType: TpNativeCardType
+  }): Promise<TpResult<T>> {
+    return this.del<T>({
+      pathParam: [tpNativeTypeCollection(nativeType), cardId],
+      param: { "format": "json" },
+    })
+  }
 
-    if ("filePath" in source) {
-      blob = new Blob([readFileSync(source.filePath)])
-      fileName = basename(source.filePath)
-    } else {
-      blob = new Blob([Buffer.from(source.fileContent, "base64")])
-      fileName = source.fileName
+  async addCardTags<T>({
+    cardId,
+    labels,
+    nativeType = "General",
+  }: {
+    cardId: string
+    labels: string[]
+    nativeType?: TpNativeCardType
+  }): Promise<TpResult<T | null>> {
+    const existing = await this.getInternalCard<{ Tags?: string }>(nativeType, cardId)
+    const currentTags = (existing?.Tags || "")
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+
+    const mergedTags = [...currentTags]
+    for (const label of labels.map((tag) => tag.trim()).filter(Boolean)) {
+      if (!mergedTags.some((tag) => tag.toLowerCase() === label.toLowerCase())) {
+        mergedTags.push(label)
+      }
     }
+
+    return this.postRaw<any, T | null>({
+      pathParam: [tpNativeTypeCollection(nativeType)],
+      param: { "format": "json" },
+    }, {
+      Id: cardId,
+      Tags: mergedTags.join(", "),
+    })
+  }
+
+  async addAttachedFile(generalId: string, source: { fileContent: string; fileName: string }): Promise<string | null> {
+    const fileName = source.fileName
+    const file = new File([Buffer.from(source.fileContent, "base64")], fileName)
 
     const formData = new FormData()
     formData.append("generalId", generalId)
-    formData.append("file", blob, fileName)
+    formData.append("file", file, fileName)
 
-    const url = `${this.baseUrl}/UploadFile.ashx?access_token=${this.token}`
-    console.error(JSON.stringify({ "UPLOAD_URL": url.replace(this.token, "***") }, null, 2))
+    const url = buildTargetprocessUrl(this.baseUrl, ["UploadFile.ashx"], { access_token: this.token }, { trailingSlash: false })
+    this.debug("UPLOAD_URL", this.redactUrl(url))
 
     try {
-      const response = await fetch(url, {
+      const response = await this.fetch(url, {
         method: "POST",
         body: formData,
       })

@@ -1,15 +1,39 @@
 import "dotenv/config";
 
+function normalizeTpBaseUrl(rawUrl: string | undefined): string {
+  const value = rawUrl?.trim() || ""
+  if (!value) return ""
+
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error("TP_BASE_URL must be a valid HTTPS URL")
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new Error("TP_BASE_URL must use https://")
+  }
+
+  if (parsed.port && parsed.port !== "443") {
+    throw new Error("TP_BASE_URL must use the default HTTPS port 443")
+  }
+
+  return parsed.toString().replace(/\/$/, "")
+}
+
 export const config = {
   tp: {
-    url: process.env.TP_BASE_URL || "",
-    token: process.env.TP_TOKEN || "",
-    ownerId: process.env.TP_OWNER_ID || "1504",
-    projectId: process.env.TP_PROJECT_ID || "",
-    teamId: process.env.TP_TEAM_ID || "",
+    url: normalizeTpBaseUrl(process.env.TP_BASE_URL),
+    token: process.env.TP_TOKEN?.trim() || "",
+    ownerId: process.env.TP_OWNER_ID?.trim() || "",
+    projectId: process.env.TP_PROJECT_ID?.trim() || "",
+    teamId: process.env.TP_TEAM_ID?.trim() || "",
 
-    processId: process.env.TP_PROCESS_ID || "89",
-    userStoryWorkflowId: process.env.TP_USER_STORY_WORKFLOW_ID || "",
-    bugWorkflowId: process.env.TP_BUG_WORKFLOW_ID || "",
+    processId: process.env.TP_PROCESS_ID?.trim() || "",
+    userStoryWorkflowId: process.env.TP_USER_STORY_WORKFLOW_ID?.trim() || "",
+    bugWorkflowId: process.env.TP_BUG_WORKFLOW_ID?.trim() || "",
+    proxySocket: process.env.TP_PROXY_SOCKET?.trim() || "",
+    internalCardTypesJson: process.env.TP_INTERNAL_CARD_TYPES_JSON?.trim() || "",
   }
 }

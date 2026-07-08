@@ -14,6 +14,7 @@ const mockTp = {
   createTask: vi.fn(),
   updateBug: vi.fn(),
   updateUserStorySubState: vi.fn(),
+  getLastRequestDiagnostic: vi.fn(),
 } as unknown as TpClient
 
 beforeEach(() => {
@@ -114,10 +115,27 @@ describe('handleCreateTask', () => {
 
   it('returns failure message when null', async () => {
     vi.mocked(mockTp.createTask).mockResolvedValue(null as any)
+    vi.mocked(mockTp.getLastRequestDiagnostic).mockReturnValue(undefined)
 
     const result = await handleCreateTask(mockTp, { title: 'Write tests', userStoryId: '145789' })
 
     expect(result.content[0].text).toContain('Failed to create task "Write tests"')
+  })
+
+  it('includes request diagnostics on create failure', async () => {
+    vi.mocked(mockTp.createTask).mockResolvedValue(null as any)
+    vi.mocked(mockTp.getLastRequestDiagnostic).mockReturnValue({
+      method: 'POST',
+      url: 'https://example.tpondemand.com/api/v1/Tasks/?access_token=***',
+      message: 'HTTP error! status: 400',
+      status: 400,
+      body: 'Project is required',
+    })
+
+    const result = await handleCreateTask(mockTp, { title: 'Write tests', userStoryId: '145789' })
+
+    expect(result.content[0].text).toContain('Error: HTTP error! status: 400')
+    expect(result.content[0].text).toContain('Body: Project is required')
   })
 
   it('calls createTask with title and userStoryId', async () => {
