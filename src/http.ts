@@ -7,7 +7,7 @@ import { config as appConfig } from "./config.js"
 import { createTargetprocessMcpServer } from "./index.js"
 import { TpClient, type TargetprocessAuth } from "./tp.js"
 import { loadHostedConfig, metadataPathForResource, type HostedConfig } from "./hosted/config.js"
-import { OAuthBroker, OAuthHttpError, type AuthenticatedMcpRequest } from "./hosted/oauth.js"
+import { OAuthBroker, OAuthHttpError, redirectUriAllowed, type AuthenticatedMcpRequest, type OAuthAuthorizationResume } from "./hosted/oauth.js"
 import { EncryptedFileCredentialStore, type TargetprocessCredential, type TargetprocessCredentialStore } from "./hosted/token_store.js"
 import {
   getCookie,
@@ -32,9 +32,15 @@ type Runtime = {
   oauth: OAuthBroker
   credentialStore: TargetprocessCredentialStore
   sessions: Map<string, SessionRecord>
+  oauthResumes?: Map<string, OAuthResumeRecord>
+  allowEmptyUnauthenticatedMcpProbeUntil?: number
 }
 
 const accountCookieName = "__Host-tpmcp_account"
+
+type OAuthResumeRecord = OAuthAuthorizationResume & {
+  expiresAt: number
+}
 
 export async function createHostedServer(runtime: Runtime) {
   return createServer(async (req, res) => {
@@ -53,7 +59,7 @@ async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse
     return
   }
 
-  if (url.pathname === metadataPathForResource(runtime.config.resource)) {
+  if (url.pathname === metadataPathForResource(runtime.config.resource) || url.pathname === "/.well-known/oauth-protected-resource") {
     sendJson(res, 200, runtime.oauth.protectedResourceMetadata())
     return
   }
@@ -73,7 +79,20 @@ async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse
     if (req.method !== "GET") return methodNotAllowed(res)
     const result = await runtime.oauth.completeOidcCallback(url)
     if (result.kind === "oauth") {
-      redirect(res, result.redirectUri)
+      const credential = await runtime.credentialStore.getCredential(result.user.id)
+      if (!credential) {
+        redirectToCredentialSetup(runtime, res, result)
+        return
+      }
+      try {
+        await validateTargetprocessCredential(runtime, credential)
+      } catch (error) {
+        if (!(error instanceof OAuthHttpError) || error.code !== "targetprocess_credentials_invalid") throw error
+        await runtime.credentialStore.deleteCredential(result.user.id)
+        redirectToCredentialSetup(runtime, res, result, "invalid")
+        return
+      }
+      redirect(res, runtime.oauth.buildClientAuthorizationRedirect(result))
     } else {
       redirect(res, new URL("/account/targetprocess", runtime.config.publicUrl).toString(), {
         "Set-Cookie": setCookie(accountCookieName, result.sessionToken, 60 * 60 * 8),
@@ -85,7 +104,9 @@ async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse
   if (url.pathname === "/oauth/token") {
     if (req.method !== "POST") return methodNotAllowed(res)
     const form = await readForm(req)
-    sendJson(res, 200, runtime.oauth.exchangeToken(form, req.headers.authorization))
+    const tokenResponse = runtime.oauth.exchangeToken(form, req.headers.authorization)
+    runtime.allowEmptyUnauthenticatedMcpProbeUntil = Date.now() + 30_000
+    sendJson(res, 200, tokenResponse)
     return
   }
 
@@ -103,6 +124,9 @@ async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse
 }
 
 async function handleAccount(runtime: Runtime, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = requestUrl(runtime.config, req)
+  let resume = validResumeRedirect(runtime.config, url.searchParams.get("resume"))
+  let oauthResume = validOAuthResumeId(runtime, url.searchParams.get("oauth_resume"))
   const sessionToken = getCookie(req, accountCookieName)
   if (!sessionToken) {
     if (req.method !== "GET") return methodNotAllowed(res)
@@ -118,9 +142,13 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
       hasCredential: Boolean(credential),
       credentialLabel: credentialLabel(credential),
       csrf: account.csrf,
-      message: "",
-      messageKind: "info",
+      message: url.searchParams.get("credential") === "invalid"
+        ? "Your saved Targetprocess token is invalid or expired. Paste a current personal access token to continue."
+        : "",
+      messageKind: url.searchParams.get("credential") === "invalid" ? "error" : "info",
       personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
+      resume,
+      oauthResume,
     }))
     return
   }
@@ -131,6 +159,8 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
   const body = contentType.includes("application/json")
     ? await readJson<AccountPostBody>(req)
     : Object.fromEntries((await readForm(req)).entries()) as AccountPostBody
+  resume = resume || validResumeRedirect(runtime.config, body.resume || null)
+  oauthResume = oauthResume || validOAuthResumeId(runtime, body.oauth_resume || null)
 
   if (body.csrf !== account.csrf) throw new OAuthHttpError(403, "invalid_csrf")
 
@@ -144,6 +174,8 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
       message: "Targetprocess credential revoked.",
       messageKind: "info",
       personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
+      resume,
+      oauthResume,
     }))
     return
   }
@@ -162,10 +194,22 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
       message: "Targetprocess rejected that token. Create or copy a personal access token and try again.",
       messageKind: "error",
       personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
+      resume,
+      oauthResume,
     }))
     return
   }
   await runtime.credentialStore.setCredential(account.user.id, account.user.email, credential)
+  if (oauthResume) {
+    const record = takeOAuthResume(runtime, oauthResume, account.user.id)
+    if (!record) throw new OAuthHttpError(400, "invalid_oauth_resume")
+    redirect(res, runtime.oauth.buildClientAuthorizationRedirect(record))
+    return
+  }
+  if (resume) {
+    redirect(res, resume)
+    return
+  }
   sendHtml(res, 200, accountPage({
     email: account.user.email,
     hasCredential: true,
@@ -174,11 +218,17 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
     message: "Targetprocess credential saved.",
     messageKind: "info",
     personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
+    resume,
+    oauthResume,
   }))
 }
 
 async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResponse): Promise<void> {
   validateHttpBoundary(runtime.config, req)
+  if (!req.headers.authorization && isEmptyPost(req) && (runtime.allowEmptyUnauthenticatedMcpProbeUntil || 0) > Date.now()) {
+    sendText(res, 202, "")
+    return
+  }
   const auth = runtime.oauth.authenticateBearer(req.headers.authorization)
   validateOrigin(runtime.config, auth, req)
 
@@ -259,6 +309,10 @@ function validateHttpBoundary(config: HostedConfig, req: IncomingMessage): void 
   }
 }
 
+function isEmptyPost(req: IncomingMessage): boolean {
+  return req.method === "POST" && headerValue(req.headers["content-length"]) === "0"
+}
+
 function validateOrigin(config: HostedConfig, auth: AuthenticatedMcpRequest, req: IncomingMessage): void {
   const origin = headerValue(req.headers.origin)
   if (!origin) return
@@ -268,12 +322,28 @@ function validateOrigin(config: HostedConfig, auth: AuthenticatedMcpRequest, req
   if (!allowed.has(origin)) throw new OAuthHttpError(403, "invalid_origin")
 }
 
+function validResumeRedirect(config: HostedConfig, rawResume: string | null): string {
+  if (!rawResume) return ""
+  let resumeUrl: URL
+  try {
+    resumeUrl = new URL(rawResume)
+  } catch {
+    return ""
+  }
+  for (const client of config.oauthClients.values()) {
+    if (redirectUriAllowed(client, resumeUrl.toString())) return resumeUrl.toString()
+  }
+  return ""
+}
+
 type AccountPostBody = {
   csrf?: string
   token?: string
+  resume?: string
   credential_kind?: string
   credentialKind?: string
   action?: string
+  oauth_resume?: string
 }
 
 function accountCredentialFromBody(body: AccountPostBody): TargetprocessCredential {
@@ -302,6 +372,58 @@ async function validateTargetprocessCredential(runtime: Runtime, credential: Tar
   if (!context?.LoggedUser?.Id) {
     throw new OAuthHttpError(400, "targetprocess_credentials_invalid")
   }
+}
+
+function redirectToCredentialSetup(
+  runtime: Runtime,
+  res: ServerResponse,
+  result: OAuthAuthorizationResume,
+  credentialState?: "invalid",
+): void {
+  const setupUrl = new URL("/account/targetprocess", runtime.config.publicUrl)
+  setupUrl.searchParams.set("oauth_resume", createOAuthResume(runtime, result))
+  if (credentialState) setupUrl.searchParams.set("credential", credentialState)
+  redirect(res, setupUrl.toString(), {
+    "Set-Cookie": setCookie(accountCookieName, runtime.oauth.createAccountSession(result.user), 60 * 60 * 8),
+  })
+}
+
+function createOAuthResume(runtime: Runtime, result: OAuthAuthorizationResume): string {
+  cleanupOAuthResumes(runtime)
+  const id = randomUUID()
+  oauthResumeStore(runtime).set(id, {
+    ...result,
+    expiresAt: Date.now() + 30 * 60 * 1000,
+  })
+  return id
+}
+
+function validOAuthResumeId(runtime: Runtime, rawId: string | null | undefined): string {
+  if (!rawId) return ""
+  cleanupOAuthResumes(runtime)
+  return oauthResumeStore(runtime).has(rawId) ? rawId : ""
+}
+
+function takeOAuthResume(runtime: Runtime, id: string, userId: string): OAuthAuthorizationResume | null {
+  cleanupOAuthResumes(runtime)
+  const store = oauthResumeStore(runtime)
+  const record = store.get(id)
+  store.delete(id)
+  if (!record || record.user.id !== userId) return null
+  const { expiresAt: _expiresAt, ...resume } = record
+  return resume
+}
+
+function cleanupOAuthResumes(runtime: Runtime): void {
+  const now = Date.now()
+  for (const [id, record] of oauthResumeStore(runtime)) {
+    if (record.expiresAt <= now) oauthResumeStore(runtime).delete(id)
+  }
+}
+
+function oauthResumeStore(runtime: Runtime): Map<string, OAuthResumeRecord> {
+  runtime.oauthResumes ||= new Map()
+  return runtime.oauthResumes
 }
 
 function requestUrl(config: HostedConfig, req: IncomingMessage): URL {
@@ -337,6 +459,8 @@ function accountPage({
   message,
   messageKind,
   personalAccessTokensUrl,
+  resume,
+  oauthResume,
 }: {
   email: string
   hasCredential: boolean
@@ -345,6 +469,8 @@ function accountPage({
   message: string
   messageKind: "info" | "error"
   personalAccessTokensUrl: string
+  resume: string
+  oauthResume: string
 }): string {
   return `<!doctype html>
 <html lang="en">
@@ -374,6 +500,8 @@ function accountPage({
   <form method="post">
     <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
     <input type="hidden" name="credential_kind" value="targetprocess_access_token">
+    ${resume ? `<input type="hidden" name="resume" value="${escapeHtml(resume)}">` : ""}
+    ${oauthResume ? `<input type="hidden" name="oauth_resume" value="${escapeHtml(oauthResume)}">` : ""}
     <label for="token">Targetprocess personal access token</label>
     <input id="token" name="token" type="password" autocomplete="off" required>
     <button type="submit">Save Targetprocess token</button>

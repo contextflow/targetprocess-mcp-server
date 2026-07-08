@@ -50,6 +50,15 @@ function hostedConfig(): HostedConfig {
         allowedOrigins: ['https://claude.ai'],
         scopes: ['mcp:tools'],
       },
+    ], [
+      'codex-local',
+      {
+        clientId: 'codex-local',
+        name: 'Codex local',
+        redirectUris: ['http://127.0.0.1/callback'],
+        allowedOrigins: [],
+        scopes: ['mcp:tools'],
+      },
     ]]),
     oidc: {
       issuerUrl: 'https://idp.example.com',
@@ -71,6 +80,7 @@ function hostedConfig(): HostedConfig {
 
 describe('hosted Targetprocess account setup', () => {
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
@@ -107,6 +117,24 @@ describe('hosted Targetprocess account setup', () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
+  })
+
+  it('accepts Codex loopback OAuth callback paths with random ports', () => {
+    const oauth = new OAuthBroker(hostedConfig())
+    const redirect = oauth.buildAuthorizationRedirect(new URL(
+      'http://localhost:3000/oauth/authorize?' +
+      new URLSearchParams({
+        response_type: 'code',
+        client_id: 'codex-local',
+        state: 'client-state',
+        code_challenge: 'challenge',
+        code_challenge_method: 'S256',
+        redirect_uri: 'http://127.0.0.1:46317/callback/mI1cg9UJHVIt',
+        scope: 'mcp:tools',
+      }).toString(),
+    ))
+
+    expect(new URL(redirect).origin).toBe('https://idp.example.com')
   })
 
   it('validates before saving and keeps the PAT link visible on invalid tokens', async () => {
@@ -182,6 +210,150 @@ describe('hosted Targetprocess account setup', () => {
       })
       expect(validHtml).toContain('Targetprocess credential saved.')
       expect(validHtml).not.toContain('valid-token')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('requires a currently valid Targetprocess token before completing an OAuth login', async () => {
+    const realFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const parsed = new URL(String(url))
+      if (parsed.hostname === '127.0.0.1') return realFetch(url, init)
+      const token = parsed.searchParams.get('access_token')
+      if (token === 'valid-token') {
+        return new Response(JSON.stringify({ LoggedUser: { Id: 113 } }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ error: 'invalid' }), { status: 401 })
+    }))
+
+    const { createHostedServer } = await import('../src/http.js')
+    const config = hostedConfig()
+    const oauth = new OAuthBroker(config)
+    vi.spyOn(oauth, 'completeOidcCallback').mockResolvedValue({
+      kind: 'oauth',
+      user: { id: 'user-1', email: 'user@example.com', groups: [] },
+      clientId: 'codex-local',
+      redirectUri: 'http://127.0.0.1:46317/callback/random',
+      scopes: ['mcp:tools'],
+      clientState: 'client-state',
+      codeChallenge: 'challenge',
+    })
+    const store = new MemoryCredentialStore()
+    await store.setCredential('user-1', 'user@example.com', {
+      kind: 'targetprocess_access_token',
+      token: 'expired-token',
+    })
+    const server = await createHostedServer({ config, oauth, credentialStore: store, sessions: new Map() })
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    config.publicUrl = baseUrl
+    config.oauthIssuer = baseUrl
+    config.resource = `${baseUrl}/mcp`
+    config.mcpUrl = `${baseUrl}/mcp`
+
+    try {
+      const callback = await fetch(`${baseUrl}/oauth/callback?code=oidc-code&state=oidc-state`, {
+        redirect: 'manual',
+      })
+      const setupLocation = callback.headers.get('location') || ''
+      const cookie = callback.headers.get('set-cookie')?.split(';')[0] || ''
+
+      expect(callback.status).toBe(302)
+      expect(setupLocation).toContain('/account/targetprocess?')
+      expect(setupLocation).toContain('oauth_resume=')
+      expect(setupLocation).toContain('credential=invalid')
+      expect(await store.getCredential('user-1')).toBeNull()
+
+      const page = await fetch(setupLocation, { headers: { Cookie: cookie } })
+      const html = await page.text()
+      const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1]
+      const oauthResume = html.match(/name="oauth_resume" value="([^"]+)"/)?.[1]
+      expect(html).toContain('invalid or expired')
+      expect(csrf).toBeTruthy()
+      expect(oauthResume).toBeTruthy()
+
+      const saved = await fetch(`${baseUrl}/account/targetprocess`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          Cookie: cookie,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          csrf: csrf || '',
+          credential_kind: 'targetprocess_access_token',
+          token: 'valid-token',
+          oauth_resume: oauthResume || '',
+        }),
+      })
+      const finalLocation = saved.headers.get('location') || ''
+
+      expect(saved.status).toBe(302)
+      expect(finalLocation).toMatch(/^http:\/\/127\.0\.0\.1:46317\/callback\/random\?code=/)
+      expect(finalLocation).toContain('state=client-state')
+      expect(await store.getCredential('user-1')).toEqual({
+        kind: 'targetprocess_access_token',
+        token: 'valid-token',
+      })
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('serves ChatGPT-compatible OAuth metadata and challenges', async () => {
+    const { createHostedServer } = await import('../src/http.js')
+    const config = hostedConfig()
+    const oauth = new OAuthBroker(config)
+    const store = new MemoryCredentialStore()
+    const server = await createHostedServer({ config, oauth, credentialStore: store, sessions: new Map() })
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    config.publicUrl = baseUrl
+    config.oauthIssuer = baseUrl
+    config.resource = `${baseUrl}/mcp`
+    config.mcpUrl = `${baseUrl}/mcp`
+
+    try {
+      const metadata = await fetch(`${baseUrl}/.well-known/oauth-protected-resource`)
+      expect(metadata.status).toBe(200)
+      await expect(metadata.json()).resolves.toMatchObject({
+        resource: `${baseUrl}/mcp`,
+        authorization_servers: [baseUrl],
+        scopes_supported: ['mcp:tools'],
+      })
+
+      const challenged = await fetch(`${baseUrl}/mcp`, { method: 'POST', body: '' })
+      expect(challenged.status).toBe(401)
+      expect(challenged.headers.get('www-authenticate')).toContain('scope="mcp:tools"')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('accepts an empty unauthenticated MCP probe briefly after token exchange', async () => {
+    const { createHostedServer } = await import('../src/http.js')
+    const config = hostedConfig()
+    const oauth = new OAuthBroker(config)
+    const store = new MemoryCredentialStore()
+    const runtime = {
+      config,
+      oauth,
+      credentialStore: store,
+      sessions: new Map(),
+      allowEmptyUnauthenticatedMcpProbeUntil: Date.now() + 30_000,
+    }
+    const server = await createHostedServer(runtime)
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    config.publicUrl = baseUrl
+    config.oauthIssuer = baseUrl
+    config.resource = `${baseUrl}/mcp`
+    config.mcpUrl = `${baseUrl}/mcp`
+
+    try {
+      const response = await fetch(`${baseUrl}/mcp`, { method: 'POST', body: '' })
+      expect(response.status).toBe(202)
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }

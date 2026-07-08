@@ -46,6 +46,15 @@ type PendingAccountLogin = {
 
 type PendingLogin = PendingAuthorization | PendingAccountLogin
 
+export type OAuthAuthorizationResume = {
+  user: OAuthUser
+  clientId: string
+  redirectUri: string
+  scopes: string[]
+  clientState?: string
+  codeChallenge: string
+}
+
 type AuthorizationCode = {
   user: OAuthUser
   clientId: string
@@ -80,7 +89,7 @@ export class OAuthBroker {
     const requestedScope = this.normalizeScopes(client, requestUrl.searchParams.get("scope"))
 
     if (responseType !== "code") throw new OAuthHttpError(400, "unsupported_response_type")
-    if (!client.redirectUris.includes(redirectUri)) throw new OAuthHttpError(400, "invalid_redirect_uri")
+    if (!redirectUriAllowed(client, redirectUri)) throw new OAuthHttpError(400, "invalid_redirect_uri")
     if (!codeChallenge || codeChallengeMethod !== "S256") throw new OAuthHttpError(400, "invalid_pkce")
 
     const state = randomBase64Url(32)
@@ -112,8 +121,8 @@ export class OAuthBroker {
   }
 
   async completeOidcCallback(requestUrl: URL): Promise<
-    | { kind: "oauth"; redirectUri: string }
-    | { kind: "account"; sessionToken: string }
+    | ({ kind: "oauth" } & OAuthAuthorizationResume)
+    | { kind: "account"; sessionToken: string; user: OAuthUser }
   > {
     this.cleanup()
     const state = requestUrl.searchParams.get("state") || ""
@@ -130,28 +139,41 @@ export class OAuthBroker {
   private completePendingLogin(
     pending: PendingLogin,
     user: OAuthUser,
-  ): { kind: "oauth"; redirectUri: string } | { kind: "account"; sessionToken: string } {
+  ): ({ kind: "oauth" } & OAuthAuthorizationResume) | { kind: "account"; sessionToken: string; user: OAuthUser } {
     if (pending.kind === "account") {
       return {
         kind: "account",
         sessionToken: this.createAccountSession(user),
+        user,
       }
     }
 
-    const code = randomBase64Url(32)
-    this.codes.set(code, {
+    return {
+      kind: "oauth",
       user,
       clientId: pending.clientId,
       redirectUri: pending.redirectUri,
       codeChallenge: pending.codeChallenge,
       scopes: pending.requestedScope,
+      clientState: pending.clientState,
+    }
+  }
+
+  buildClientAuthorizationRedirect(resume: OAuthAuthorizationResume): string {
+    const code = randomBase64Url(32)
+    this.codes.set(code, {
+      user: resume.user,
+      clientId: resume.clientId,
+      redirectUri: resume.redirectUri,
+      codeChallenge: resume.codeChallenge,
+      scopes: resume.scopes,
       expiresAt: Date.now() + 5 * 60 * 1000,
     })
 
-    const redirectUrl = new URL(pending.redirectUri)
+    const redirectUrl = new URL(resume.redirectUri)
     redirectUrl.searchParams.set("code", code)
-    if (pending.clientState) redirectUrl.searchParams.set("state", pending.clientState)
-    return { kind: "oauth", redirectUri: redirectUrl.toString() }
+    if (resume.clientState) redirectUrl.searchParams.set("state", resume.clientState)
+    return redirectUrl.toString()
   }
 
   exchangeToken(form: URLSearchParams, authorizationHeader?: string): Record<string, unknown> {
@@ -237,7 +259,7 @@ export class OAuthBroker {
 
   wwwAuthenticateHeader(): string {
     const metadataUrl = new URL(`/.well-known/oauth-protected-resource${new URL(this.config.resource).pathname}`, this.config.publicUrl)
-    return `Bearer resource_metadata="${metadataUrl.toString()}"`
+    return `Bearer resource_metadata="${metadataUrl.toString()}", scope="mcp:tools"`
   }
 
   private exchangeAuthorizationCode(form: URLSearchParams, authorizationHeader?: string): Record<string, unknown> {
@@ -434,6 +456,43 @@ export class OAuthBroker {
       if (value.expiresAt <= now) this.refreshTokens.delete(key)
     }
   }
+}
+
+export function redirectUriAllowed(client: OAuthClientConfig, redirectUri: string): boolean {
+  if (client.redirectUris.includes(redirectUri)) return true
+
+  let actual: URL
+  try {
+    actual = new URL(redirectUri)
+  } catch {
+    return false
+  }
+
+  for (const rawRegistered of client.redirectUris) {
+    let registered: URL
+    try {
+      registered = new URL(rawRegistered)
+    } catch {
+      continue
+    }
+
+    if (!isLoopbackHost(registered.hostname)) continue
+    if (registered.protocol !== actual.protocol) continue
+    if (registered.hostname !== actual.hostname) continue
+    if (registered.port && registered.port !== actual.port) continue
+    if (!actual.port) continue
+
+    const prefix = registered.pathname.endsWith("/")
+      ? registered.pathname
+      : `${registered.pathname}/`
+    if (actual.pathname === registered.pathname || actual.pathname.startsWith(prefix)) return true
+  }
+
+  return false
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]"
 }
 
 export class OAuthHttpError extends Error {
