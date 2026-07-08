@@ -52,11 +52,20 @@ import { handleDeleteCardRelation } from "./handlers/delete_card_relation.js";
 import { handleAddCardTags } from "./handlers/add_card_tags.js";
 import { handleAddFileAttachment } from "./handlers/add_file_attachment.js";
 import { handleCreateInternalCard, handleDeleteInternalCard, handleGetInternalCard, handleGetInternalCardTypes, handleSearchInternalCards } from "./handlers/internal_cards.js";
+import { decideToolAccess, type AccessMode, type PolicyCategory, type TargetprocessAccessPolicy } from "./hosted/policy.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
 
-export function createTargetprocessMcpServer(tp: TpClient = new TpClient()): McpServer {
+export type TargetprocessMcpContext = {
+  accessMode: AccessMode
+  policy: TargetprocessAccessPolicy
+  userEmail: string
+  checkToolCall?: (toolName: string, category: PolicyCategory) => string | null | Promise<string | null>
+  prepareToolArgs?: (toolName: string, args: any) => any | Promise<any>
+}
+
+export function createTargetprocessMcpServer(tp: TpClient = new TpClient(), context?: TargetprocessMcpContext): McpServer {
 const server = new McpServer(
   {
     name: "tp",
@@ -77,6 +86,25 @@ const server = new McpServer(
     }
   }
 )
+
+if (context) {
+  const originalRegisterTool = server.registerTool.bind(server)
+  server.registerTool = ((name: string, config: any, callback: any) => {
+    const decision = decideToolAccess(context.accessMode, context.policy, name)
+    if (!decision.allowed) return server as any
+
+    const wrapped = async (args: any, extra: any) => {
+      const blocked = await context.checkToolCall?.(name, decision.category)
+      if (blocked) return { content: [{ type: 'text' as const, text: blocked }] }
+
+      const effectiveArgs = await context.prepareToolArgs?.(name, args) || args
+
+      return callback(effectiveArgs, extra)
+    }
+
+    return (originalRegisterTool as any)(name, config, wrapped)
+  }) as typeof server.registerTool
+}
 
 server.registerTool(
   'get_user_story_content',

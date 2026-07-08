@@ -1,4 +1,6 @@
 import { createPublicKey } from "crypto"
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs"
+import { dirname } from "path"
 import type { HostedConfig, OAuthClientConfig } from "./config.js"
 import {
   audienceMatches,
@@ -71,13 +73,22 @@ type RefreshGrant = {
   expiresAt: number
 }
 
+type OAuthStateFile = {
+  version: 1
+  pending: Record<string, PendingLogin>
+  codes: Record<string, AuthorizationCode>
+  refreshTokens: Record<string, RefreshGrant>
+}
+
 export class OAuthBroker {
   private readonly pending = new Map<string, PendingLogin>()
   private readonly codes = new Map<string, AuthorizationCode>()
   private readonly refreshTokens = new Map<string, RefreshGrant>()
   private jwksCache: { expiresAt: number; keys: Record<string, unknown>[] } | undefined
 
-  constructor(private readonly config: HostedConfig) {}
+  constructor(private readonly config: HostedConfig) {
+    this.loadState()
+  }
 
   buildAuthorizationRedirect(requestUrl: URL): string {
     this.cleanup()
@@ -104,6 +115,7 @@ export class OAuthBroker {
       nonce,
       createdAt: Date.now(),
     })
+    this.persistState()
 
     return this.oidcAuthorizationUrl(state, nonce)
   }
@@ -117,6 +129,7 @@ export class OAuthBroker {
       nonce,
       createdAt: Date.now(),
     })
+    this.persistState()
     return this.oidcAuthorizationUrl(state, nonce)
   }
 
@@ -129,6 +142,7 @@ export class OAuthBroker {
     const oidcCode = requestUrl.searchParams.get("code") || ""
     const pending = this.pending.get(state)
     this.pending.delete(state)
+    this.persistState()
 
     if (!pending || !oidcCode) throw new OAuthHttpError(400, "invalid_oidc_callback")
 
@@ -169,6 +183,7 @@ export class OAuthBroker {
       scopes: resume.scopes,
       expiresAt: Date.now() + 5 * 60 * 1000,
     })
+    this.persistState()
 
     const redirectUrl = new URL(resume.redirectUri)
     redirectUrl.searchParams.set("code", code)
@@ -269,6 +284,7 @@ export class OAuthBroker {
     const codeVerifier = form.get("code_verifier") || ""
     const grant = this.codes.get(code)
     this.codes.delete(code)
+    this.persistState()
 
     if (!grant || grant.expiresAt <= Date.now()) throw new OAuthHttpError(400, "invalid_grant")
     if (grant.clientId !== client.clientId || grant.redirectUri !== redirectUri) {
@@ -283,6 +299,7 @@ export class OAuthBroker {
     const refreshToken = form.get("refresh_token") || ""
     const grant = this.refreshTokens.get(refreshToken)
     this.refreshTokens.delete(refreshToken)
+    this.persistState()
 
     if (!grant || grant.expiresAt <= Date.now() || grant.clientId !== client.clientId) {
       throw new OAuthHttpError(400, "invalid_grant")
@@ -298,6 +315,7 @@ export class OAuthBroker {
       scopes,
       expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
     })
+    this.persistState()
 
     const accessToken = signJwt({
       sub: user.id,
@@ -446,15 +464,56 @@ export class OAuthBroker {
 
   private cleanup(): void {
     const now = Date.now()
+    let changed = false
     for (const [key, value] of this.pending) {
-      if (value.createdAt + 10 * 60 * 1000 <= now) this.pending.delete(key)
+      if (value.createdAt + 10 * 60 * 1000 <= now) {
+        this.pending.delete(key)
+        changed = true
+      }
     }
     for (const [key, value] of this.codes) {
-      if (value.expiresAt <= now) this.codes.delete(key)
+      if (value.expiresAt <= now) {
+        this.codes.delete(key)
+        changed = true
+      }
     }
     for (const [key, value] of this.refreshTokens) {
-      if (value.expiresAt <= now) this.refreshTokens.delete(key)
+      if (value.expiresAt <= now) {
+        this.refreshTokens.delete(key)
+        changed = true
+      }
     }
+    if (changed) this.persistState()
+  }
+
+  private loadState(): void {
+    const path = this.config.oauthStateStorePath
+    if (!path) return
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as OAuthStateFile
+      if (parsed.version !== 1) return
+      for (const [key, value] of Object.entries(parsed.pending || {})) this.pending.set(key, value)
+      for (const [key, value] of Object.entries(parsed.codes || {})) this.codes.set(key, value)
+      for (const [key, value] of Object.entries(parsed.refreshTokens || {})) this.refreshTokens.set(key, value)
+      this.cleanup()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+  }
+
+  private persistState(): void {
+    const path = this.config.oauthStateStorePath
+    if (!path) return
+    const state: OAuthStateFile = {
+      version: 1,
+      pending: Object.fromEntries(this.pending),
+      codes: Object.fromEntries(this.codes),
+      refreshTokens: Object.fromEntries(this.refreshTokens),
+    }
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`
+    writeFileSync(tempPath, JSON.stringify(state, null, 2), { mode: 0o600 })
+    renameSync(tempPath, path)
   }
 }
 

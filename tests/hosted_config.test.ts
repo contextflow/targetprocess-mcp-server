@@ -16,6 +16,9 @@ describe('hosted MCP config', () => {
       MCP_PUBLIC_URL: 'https://mcp.example.com',
       MCP_SIGNING_KEY_B64: key,
       TP_TOKEN_ENCRYPTION_KEY_B64: key,
+      TP_TOKEN_STORE_PATH: '/var/lib/tp-mcp/tokens.json',
+      MCP_OAUTH_STATE_STORE_PATH: '/var/lib/tp-mcp/oauth-state.json',
+      TP_SHARED_TOKEN: 'shared-token',
       MCP_OAUTH_CLIENTS_JSON: JSON.stringify([{
         client_id: 'claude-org',
         name: 'Claude org connector',
@@ -35,6 +38,9 @@ describe('hosted MCP config', () => {
     expect(config.oauthClients.get('claude-org')?.redirectUris).toEqual(['https://claude.ai/api/mcp/auth/callback'])
     expect(config.oidc.metadata.tokenEndpoint).toBe('https://idp.example.com/token')
     expect(config.tpPersonalAccessTokensUrl).toBe('https://example.tpondemand.com/RestUI/Board.aspx#page=settings/authAndSecurity/personalAccessTokensTab')
+    expect(config.tokenStorePath).toBe('/var/lib/tp-mcp/tokens.json')
+    expect(config.oauthStateStorePath).toBe('/var/lib/tp-mcp/oauth-state.json')
+    expect(config.tpSharedToken).toBe('shared-token')
     expect(metadataPathForResource(config.resource)).toBe('/.well-known/oauth-protected-resource/mcp')
   })
 

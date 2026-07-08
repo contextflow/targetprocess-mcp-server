@@ -29,8 +29,10 @@ export type HostedConfig = {
   signingKey: Buffer
   tokenEncryptionKey: Buffer
   tokenStorePath: string
+  oauthStateStorePath: string
   tpBaseUrl: string
   tpPersonalAccessTokensUrl: string
+  tpSharedToken?: string
   oauthClients: Map<string, OAuthClientConfig>
   oidc: {
     issuerUrl: string
@@ -78,8 +80,10 @@ export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Pr
     signingKey: parseBase64Key(requireEnv(env.MCP_SIGNING_KEY_B64, "MCP_SIGNING_KEY_B64"), 32, "MCP_SIGNING_KEY_B64"),
     tokenEncryptionKey: parseBase64Key(requireEnv(env.TP_TOKEN_ENCRYPTION_KEY_B64, "TP_TOKEN_ENCRYPTION_KEY_B64"), 32, "TP_TOKEN_ENCRYPTION_KEY_B64"),
     tokenStorePath: env.TP_TOKEN_STORE_PATH?.trim() || "/tmp/targetprocess-mcp-user-tokens.json",
+    oauthStateStorePath: env.MCP_OAUTH_STATE_STORE_PATH?.trim() || `${env.TP_TOKEN_STORE_PATH?.trim() || "/tmp/targetprocess-mcp-user-tokens.json"}.oauth-state.json`,
     tpBaseUrl,
     tpPersonalAccessTokensUrl: personalAccessTokensUrl(tpBaseUrl),
+    tpSharedToken: env.TP_SHARED_TOKEN?.trim() || undefined,
     oauthClients: parseOAuthClients(requireEnv(env.MCP_OAUTH_CLIENTS_JSON, "MCP_OAUTH_CLIENTS_JSON")),
     oidc,
   }
