@@ -107,6 +107,8 @@ MCP_OAUTH_CLIENTS_JSON='[
 
 `access_token_ttl_seconds` controls the short-lived bearer token returned to that client. The default is `900` seconds. Use a longer value for Codex if active MCP sessions get stuck at the 15-minute mark instead of refreshing cleanly. Refresh tokens are still issued and persisted separately under `MCP_OAUTH_STATE_STORE_PATH`.
 
+Claude Web can usually keep the default 15-minute access-token lifetime because it is a hosted/browser client: the Claude service owns the connector session and can refresh or re-authorize before opening a new MCP connection. Codex CLI is a local process and may keep using an existing MCP connection until the bearer token expires; if that client path does not refresh the active session, the server sees `authorization required` even though refresh-token state exists. The committed dev startup script, `scripts/start-hosted-dev.sh`, therefore keeps web clients at `MCP_WEB_ACCESS_TOKEN_TTL_SECONDS=900` and sets CLI clients to `MCP_CLI_ACCESS_TOKEN_TTL_SECONDS=28800` by default.
+
 After changing `MCP_OAUTH_CLIENTS_JSON`, restart the hosted MCP service. Then configure the local Codex CLI to use the same client ID and resource:
 
 ```sh
