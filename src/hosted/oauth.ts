@@ -121,7 +121,7 @@ export class OAuthBroker {
     return this.oidcAuthorizationUrl(state, nonce)
   }
 
-  buildAccountLoginRedirect(): string {
+  buildAccountLoginRedirect(options: { prompt?: string } = {}): string {
     this.cleanup()
     const state = randomBase64Url(32)
     const nonce = randomBase64Url(32)
@@ -131,7 +131,7 @@ export class OAuthBroker {
       createdAt: Date.now(),
     })
     this.persistState()
-    return this.oidcAuthorizationUrl(state, nonce)
+    return this.oidcAuthorizationUrl(state, nonce, options)
   }
 
   async completeOidcCallback(requestUrl: URL): Promise<
@@ -202,6 +202,24 @@ export class OAuthBroker {
       return this.exchangeRefreshToken(form, authorizationHeader)
     }
     throw new OAuthHttpError(400, "unsupported_grant_type")
+  }
+
+  revokeUserGrants(userId: string): void {
+    this.cleanup()
+    let changed = false
+    for (const [code, grant] of this.codes) {
+      if (grant.user.id === userId) {
+        this.codes.delete(code)
+        changed = true
+      }
+    }
+    for (const [refreshToken, grant] of this.refreshTokens) {
+      if (grant.user.id === userId) {
+        this.refreshTokens.delete(refreshToken)
+        changed = true
+      }
+    }
+    if (changed) this.persistState()
   }
 
   authenticateBearer(authorizationHeader?: string): AuthenticatedMcpRequest {
@@ -379,7 +397,7 @@ export class OAuthBroker {
     return unique
   }
 
-  private oidcAuthorizationUrl(state: string, nonce: string): string {
+  private oidcAuthorizationUrl(state: string, nonce: string, options: { prompt?: string } = {}): string {
     const oidc = this.requireOidc()
     const url = new URL(oidc.metadata.authorizationEndpoint)
     url.searchParams.set("response_type", "code")
@@ -391,6 +409,7 @@ export class OAuthBroker {
     if (oidc.allowedHostedDomains.length > 0) {
       url.searchParams.set("hd", oidc.allowedHostedDomains[0])
     }
+    if (options.prompt) url.searchParams.set("prompt", options.prompt)
     return url.toString()
   }
 

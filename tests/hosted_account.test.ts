@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OAuthBroker } from '../src/hosted/oauth.js'
 import type { HostedConfig } from '../src/hosted/config.js'
 import { defaultAccessPolicy } from '../src/hosted/policy.js'
+import { sha256Base64Url } from '../src/hosted/security.js'
 import type { TargetprocessAccount, TargetprocessCredential, TargetprocessCredentialStore, TargetprocessUserSettings } from '../src/hosted/token_store.js'
 
 const signingKey = Buffer.alloc(32, 3)
@@ -136,9 +137,147 @@ describe('hosted Targetprocess account setup', () => {
 
       expect(response.status).toBe(200)
       expect(html).toContain('RestUI/Board.aspx#page=settings/authAndSecurity/personalAccessTokensTab')
-      expect(html).toContain('Personal token status: <strong>saved')
+      expect(html).toContain('Targetprocess MCP account settings')
+      expect(html).toContain('Personal token status<strong>saved')
+      expect(html).toContain('Replace personal token')
+      expect(html).toContain('name="allow_creates"')
       expect(html).toContain('Revoke personal token')
       expect(html).not.toContain('saved-secret-token')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('renders service-token settings with read-only agent permissions', async () => {
+    const { createHostedServer } = await import('../src/http.js')
+    const config = hostedConfig()
+    config.tpSharedToken = 'shared-token'
+    const oauth = new OAuthBroker(config)
+    const store = new MemoryCredentialStore()
+    const session = oauth.createAccountSession({
+      id: 'user-1',
+      email: 'user@example.com',
+      groups: [],
+    })
+    await store.setAccount('user-1', 'user@example.com', {
+      credential: { kind: 'targetprocess_shared_token' },
+      accessMode: 'shared',
+      policy: defaultAccessPolicy,
+    })
+    const server = await createHostedServer({ config, oauth, credentialStore: store, sessions: new Map() })
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+
+    try {
+      const response = await fetch(`${baseUrl}/account/targetprocess`, {
+        headers: { Cookie: `__Host-tpmcp_account=${session}` },
+      })
+      const html = await response.text()
+
+      expect(response.status).toBe(200)
+      expect(html).toContain('Current access mode<strong>Limited service access')
+      expect(html).toContain('Service-token mode uses fixed server-side permissions')
+      expect(html).not.toContain('name="allow_creates"')
+      expect(html).not.toContain('name="allow_comments"')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('deregisters the account, revokes OAuth grants, closes sessions, and redirects to Google account selection', async () => {
+    const { createHostedServer } = await import('../src/http.js')
+    const config = hostedConfig()
+    const oauth = new OAuthBroker(config)
+    const store = new MemoryCredentialStore()
+    const session = oauth.createAccountSession({
+      id: 'user-1',
+      email: 'user@example.com',
+      groups: [],
+    })
+    await store.setCredential('user-1', 'user@example.com', {
+      kind: 'targetprocess_access_token',
+      token: 'saved-secret-token',
+    })
+
+    const verifier = 'codex-local-verifier'
+    const redirectUri = 'http://127.0.0.1/callback'
+    const callback = oauth.buildClientAuthorizationRedirect({
+      user: { id: 'user-1', email: 'user@example.com', groups: [] },
+      clientId: 'codex-local',
+      redirectUri,
+      scopes: ['mcp:tools'],
+      codeChallenge: sha256Base64Url(verifier),
+    })
+    const code = new URL(callback).searchParams.get('code') || ''
+    const tokens = oauth.exchangeToken(new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+      client_id: 'codex-local',
+      code_verifier: verifier,
+    }))
+    const refreshToken = String(tokens.refresh_token)
+    const closeSpy = vi.fn(async () => undefined)
+    const runtime = {
+      config,
+      oauth,
+      credentialStore: store,
+      sessions: new Map([['session-1', {
+        transport: { close: closeSpy },
+        userId: 'user-1',
+        clientId: 'codex-local',
+      }]]),
+      oauthResumes: new Map([['resume-1', {
+        kind: 'oauth',
+        user: { id: 'user-1', email: 'user@example.com', groups: [] },
+        clientId: 'codex-local',
+        redirectUri,
+        scopes: ['mcp:tools'],
+        codeChallenge: sha256Base64Url('resume-verifier'),
+        expiresAt: Date.now() + 30 * 60 * 1000,
+      }]]),
+      oauthResumesLoaded: true,
+    }
+    const server = await createHostedServer(runtime as any)
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+
+    try {
+      const page = await fetch(`${baseUrl}/account/targetprocess`, {
+        headers: { Cookie: `__Host-tpmcp_account=${session}` },
+      })
+      const html = await page.text()
+      const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1]
+      expect(html).toContain('Deregister and sign out')
+      expect(csrf).toBeTruthy()
+
+      const deregistered = await fetch(`${baseUrl}/account/targetprocess`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          Cookie: `__Host-tpmcp_account=${session}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          csrf: csrf || '',
+          action: 'deregister',
+        }),
+      })
+      const location = new URL(deregistered.headers.get('location') || '')
+
+      expect(deregistered.status).toBe(302)
+      expect(location.origin).toBe('https://idp.example.com')
+      expect(location.searchParams.get('prompt')).toBe('select_account')
+      expect(deregistered.headers.get('set-cookie')).toContain('__Host-tpmcp_account=;')
+      expect(await store.getCredential('user-1')).toBeNull()
+      expect(runtime.sessions.has('session-1')).toBe(false)
+      expect(closeSpy).toHaveBeenCalledTimes(1)
+      expect(runtime.oauthResumes.has('resume-1')).toBe(false)
+      expect(() => oauth.exchangeToken(new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: 'codex-local',
+      }))).toThrow('invalid_grant')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
@@ -294,10 +433,35 @@ describe('hosted Targetprocess account setup', () => {
       const html = await page.text()
       const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1]
       const oauthResume = html.match(/name="oauth_resume" value="([^"]+)"/)?.[1]
-      expect(html).toContain('Review your Targetprocess MCP configuration')
-      expect(html).toContain('Personal token status: <strong>not saved')
+      expect(html).toContain('Connect Targetprocess MCP')
+      expect(html).toContain('Save a current Targetprocess personal access token')
+      expect(html).toContain('Save token and continue')
       expect(csrf).toBeTruthy()
       expect(oauthResume).toBeTruthy()
+
+      const rejected = await fetch(`${baseUrl}/account/targetprocess`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          Cookie: cookie,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          csrf: csrf || '',
+          action: 'save_personal_finish_oauth',
+          credential_kind: 'targetprocess_access_token',
+          token: 'invalid-token',
+          oauth_resume: oauthResume || '',
+        }),
+      })
+      const rejectedHtml = await rejected.text()
+      const retryResume = rejectedHtml.match(/name="oauth_resume" value="([^"]+)"/)?.[1]
+
+      expect(rejected.status).toBe(400)
+      expect(rejectedHtml).toContain('Targetprocess rejected that token')
+      expect(retryResume).toBe(oauthResume)
+      expect(await store.getCredential('user-1')).toBeNull()
+      expect(rejectedHtml).not.toContain('invalid-token')
 
       const saved = await fetch(`${baseUrl}/account/targetprocess`, {
         method: 'POST',
@@ -308,43 +472,100 @@ describe('hosted Targetprocess account setup', () => {
         },
         body: new URLSearchParams({
           csrf: csrf || '',
+          action: 'save_personal_finish_oauth',
           credential_kind: 'targetprocess_access_token',
           token: 'valid-token',
           oauth_resume: oauthResume || '',
         }),
       })
-      const savedHtml = await saved.text()
-      const finishCsrf = savedHtml.match(/name="csrf" value="([^"]+)"/)?.[1]
-      const finishResume = savedHtml.match(/name="oauth_resume" value="([^"]+)"/)?.[1]
+      const finalLocation = saved.headers.get('location') || ''
 
-      expect(saved.status).toBe(200)
-      expect(savedHtml).toContain('Targetprocess credential saved. Review your configuration')
-      expect(savedHtml).toContain('Finish MCP login')
-      expect(finishCsrf).toBeTruthy()
-      expect(finishResume).toBe(oauthResume)
+      expect(saved.status).toBe(302)
+      expect(finalLocation).toMatch(/^http:\/\/127\.0\.0\.1:46317\/callback\/random\?code=/)
+      expect(finalLocation).toContain('state=client-state')
       expect(await store.getCredential('user-1')).toEqual({
         kind: 'targetprocess_access_token',
         token: 'valid-token',
       })
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
 
-      const finished = await fetch(`${baseUrl}/account/targetprocess`, {
+  it('tolerates duplicate OAuth finish submits for the same account resume', async () => {
+    const realFetch = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL, init?: RequestInit) => {
+      const parsed = new URL(String(url))
+      if (parsed.hostname === '127.0.0.1') return realFetch(url, init)
+      const token = parsed.searchParams.get('access_token')
+      if (token === 'shared-token') {
+        return new Response(JSON.stringify({ LoggedUser: { Id: 113 } }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ error: 'invalid' }), { status: 401 })
+    }))
+
+    const { createHostedServer } = await import('../src/http.js')
+    const config = hostedConfig()
+    config.tpSharedToken = 'shared-token'
+    const oauth = new OAuthBroker(config)
+    vi.spyOn(oauth, 'completeOidcCallback').mockResolvedValue({
+      kind: 'oauth',
+      user: { id: 'user-1', email: 'user@example.com', groups: [] },
+      clientId: 'codex-local',
+      redirectUri: 'http://127.0.0.1:46317/callback/random',
+      scopes: ['mcp:tools'],
+      clientState: 'client-state',
+      codeChallenge: 'challenge',
+    })
+    const store = new MemoryCredentialStore()
+    const server = await createHostedServer({ config, oauth, credentialStore: store, sessions: new Map() })
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    config.publicUrl = baseUrl
+    config.oauthIssuer = baseUrl
+    config.resource = `${baseUrl}/mcp`
+    config.mcpUrl = `${baseUrl}/mcp`
+
+    try {
+      const callback = await fetch(`${baseUrl}/oauth/callback?code=oidc-code&state=oidc-state`, {
+        redirect: 'manual',
+      })
+      const setupLocation = callback.headers.get('location') || ''
+      const cookie = callback.headers.get('set-cookie')?.split(';')[0] || ''
+      const page = await fetch(setupLocation, { headers: { Cookie: cookie } })
+      const html = await page.text()
+      const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1]
+      const oauthResume = html.match(/name="oauth_resume" value="([^"]+)"/)?.[1]
+      const body = new URLSearchParams({
+        csrf: csrf || '',
+        action: 'finish_shared_oauth',
+        oauth_resume: oauthResume || '',
+      })
+
+      const first = await fetch(`${baseUrl}/account/targetprocess`, {
         method: 'POST',
         redirect: 'manual',
         headers: {
           Cookie: cookie,
           'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: new URLSearchParams({
-          csrf: finishCsrf || '',
-          action: 'finish_oauth',
-          oauth_resume: finishResume || '',
-        }),
+        body,
       })
-      const finalLocation = finished.headers.get('location') || ''
+      const second = await fetch(`${baseUrl}/account/targetprocess`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          Cookie: cookie,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body,
+      })
 
-      expect(finished.status).toBe(302)
-      expect(finalLocation).toMatch(/^http:\/\/127\.0\.0\.1:46317\/callback\/random\?code=/)
-      expect(finalLocation).toContain('state=client-state')
+      expect(first.status).toBe(302)
+      expect(second.status).toBe(302)
+      expect(first.headers.get('location') || '').toMatch(/^http:\/\/127\.0\.0\.1:46317\/callback\/random\?code=/)
+      expect(second.headers.get('location') || '').toMatch(/^http:\/\/127\.0\.0\.1:46317\/callback\/random\?code=/)
+      expect(second.headers.get('location')).not.toBe(first.headers.get('location'))
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
@@ -416,7 +637,9 @@ describe('hosted Targetprocess account setup', () => {
       const html = await page.text()
       const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1]
       const oauthResume = html.match(/name="oauth_resume" value="([^"]+)"/)?.[1]
-      expect(html).toContain('Finish MCP login')
+      expect(html).toContain('Connect Targetprocess MCP')
+      expect(html).toContain('Limited service access')
+      expect(html).toContain('Continue to Codex local')
       expect(csrf).toBeTruthy()
       expect(oauthResume).toBeTruthy()
 
@@ -429,7 +652,7 @@ describe('hosted Targetprocess account setup', () => {
         },
         body: new URLSearchParams({
           csrf: csrf || '',
-          action: 'finish_oauth',
+          action: 'finish_shared_oauth',
           oauth_resume: oauthResume || '',
         }),
       })

@@ -15,6 +15,7 @@ import { EncryptedFileCredentialStore, type TargetprocessAccount, type Targetpro
 import { MetricsRegistry } from "./hosted/metrics.js"
 import { stdoutAuditLogger, targetIdFromArgs, type AuditLogger } from "./hosted/audit.js"
 import {
+  clearCookie,
   getCookie,
   methodNotAllowed,
   readForm,
@@ -38,6 +39,7 @@ type Runtime = {
   credentialStore: TargetprocessCredentialStore
   sessions: Map<string, SessionRecord>
   oauthResumes?: Map<string, OAuthResumeRecord>
+  consumedOAuthResumes?: Map<string, OAuthResumeRecord>
   oauthResumesLoaded?: boolean
   rateLimits?: Map<string, RateLimitRecord>
   allowEmptyUnauthenticatedMcpProbeUntil?: number
@@ -46,6 +48,7 @@ type Runtime = {
 }
 
 const accountCookieName = "__Host-tpmcp_account"
+const consumedOAuthResumeRetryMs = 2 * 60 * 1000
 
 type OAuthResumeRecord = OAuthAuthorizationResume & {
   expiresAt: number
@@ -205,16 +208,16 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
       email: account.user.email,
       account: storedAccount,
       sharedTokenAvailable: Boolean(runtime.config.tpSharedToken),
+      clientName: oauthResumeClientName(runtime, oauthResume),
       csrf: account.csrf,
-      message: url.searchParams.get("finish") === "review"
-        ? "Review your Targetprocess MCP configuration, then finish the MCP login."
-        : url.searchParams.get("credential") === "invalid"
+      message: url.searchParams.get("credential") === "invalid"
         ? "Your saved Targetprocess token is invalid or expired. Paste a current personal access token to continue."
         : "",
       messageKind: url.searchParams.get("credential") === "invalid" ? "error" : "info",
       personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
       resume,
       oauthResume,
+      tokenInvalid: url.searchParams.get("credential") === "invalid",
     }))
     return
   }
@@ -226,9 +229,20 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
     ? await readJson<AccountPostBody>(req)
     : Object.fromEntries((await readForm(req)).entries()) as AccountPostBody
   resume = resume || validResumeRedirect(runtime.config, body.resume || null)
-  oauthResume = oauthResume || validOAuthResumeId(runtime, body.oauth_resume || null)
+  oauthResume = oauthResume || body.oauth_resume || ""
 
   if (body.csrf !== account.csrf) throw new OAuthHttpError(403, "invalid_csrf")
+
+  if (body.action === "deregister") {
+    await runtime.credentialStore.deleteCredential(account.user.id)
+    await closeUserSessions(runtime, account.user.id)
+    runtime.oauth.revokeUserGrants(account.user.id)
+    deleteOAuthResumesForUser(runtime, account.user.id)
+    redirect(res, runtime.oauth.buildAccountLoginRedirect({ prompt: "select_account" }), {
+      "Set-Cookie": clearCookie(accountCookieName),
+    })
+    return
+  }
 
   if (body.action === "revoke") {
     await runtime.credentialStore.deleteCredential(account.user.id)
@@ -236,23 +250,77 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
       email: account.user.email,
       account: await getDisplayAccount(runtime, account.user.id),
       sharedTokenAvailable: Boolean(runtime.config.tpSharedToken),
+      clientName: oauthResumeClientName(runtime, oauthResume),
       csrf: account.csrf,
       message: "Targetprocess credential revoked.",
       messageKind: "info",
       personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
       resume,
       oauthResume,
+      tokenInvalid: false,
     }))
     return
   }
 
   if (body.action === "finish_oauth") {
-    const record = oauthResume ? takeOAuthResume(runtime, oauthResume, account.user.id) : null
+    const record = oauthResume ? lookupOAuthResume(runtime, oauthResume, account.user.id) : null
     if (!record) throw new OAuthHttpError(400, "invalid_oauth_resume")
     const storedAccount = await resolveUsableAccount(runtime, account.user.id, account.user.email)
     if (!storedAccount) return redirectToCredentialSetup(runtime, res, record)
     await validateAccount(runtime, storedAccount)
-    redirect(res, runtime.oauth.buildClientAuthorizationRedirect(record))
+    const consumed = completeOAuthResume(runtime, oauthResume, account.user.id)
+    if (!consumed) throw new OAuthHttpError(400, "invalid_oauth_resume")
+    redirect(res, runtime.oauth.buildClientAuthorizationRedirect(consumed))
+    return
+  }
+
+  if (body.action === "finish_shared_oauth") {
+    const record = oauthResume ? lookupOAuthResume(runtime, oauthResume, account.user.id) : null
+    if (!record) throw new OAuthHttpError(400, "invalid_oauth_resume")
+    await validateSharedToken(runtime)
+    await runtime.credentialStore.setAccount(account.user.id, account.user.email, {
+      credential: { kind: "targetprocess_shared_token" },
+      accessMode: "shared",
+      policy: sharedTokenPolicy,
+    })
+    const consumed = completeOAuthResume(runtime, oauthResume, account.user.id)
+    if (!consumed) throw new OAuthHttpError(400, "invalid_oauth_resume")
+    redirect(res, runtime.oauth.buildClientAuthorizationRedirect(consumed))
+    return
+  }
+
+  if (body.action === "save_personal_finish_oauth") {
+    const record = oauthResume ? lookupOAuthResume(runtime, oauthResume, account.user.id) : null
+    if (!record) throw new OAuthHttpError(400, "invalid_oauth_resume")
+    const credential = accountCredentialFromBody(body)
+    const settings = personalSettingsFromBody(body, await getDisplayAccount(runtime, account.user.id))
+    try {
+      await validateTargetprocessCredential(runtime, credential)
+    } catch (error) {
+      if (!(error instanceof OAuthHttpError) || error.code !== "targetprocess_credentials_invalid") throw error
+      sendHtml(res, 400, accountPage({
+        email: account.user.email,
+        account: await getDisplayAccount(runtime, account.user.id),
+        sharedTokenAvailable: Boolean(runtime.config.tpSharedToken),
+        clientName: oauthResumeClientName(runtime, oauthResume),
+        csrf: account.csrf,
+        message: "Targetprocess rejected that token. Create or copy a personal access token and try again.",
+        messageKind: "error",
+        personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
+        resume,
+        oauthResume,
+        tokenInvalid: true,
+      }))
+      return
+    }
+    await runtime.credentialStore.setAccount(account.user.id, account.user.email, {
+      credential,
+      accessMode: "personal",
+      policy: settings.policy,
+    })
+    const consumed = completeOAuthResume(runtime, oauthResume, account.user.id)
+    if (!consumed) throw new OAuthHttpError(400, "invalid_oauth_resume")
+    redirect(res, runtime.oauth.buildClientAuthorizationRedirect(consumed))
     return
   }
 
@@ -272,12 +340,14 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
           email: account.user.email,
           account: await getDisplayAccount(runtime, account.user.id),
           sharedTokenAvailable: Boolean(runtime.config.tpSharedToken),
+          clientName: oauthResumeClientName(runtime, oauthResume),
           csrf: account.csrf,
           message: "Paste and save a personal Targetprocess token before switching to personal-token mode.",
           messageKind: "error",
           personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
           resume,
           oauthResume,
+          tokenInvalid: false,
         }))
         return
       }
@@ -287,18 +357,20 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
       email: account.user.email,
       account: await getDisplayAccount(runtime, account.user.id),
       sharedTokenAvailable: Boolean(runtime.config.tpSharedToken),
+      clientName: oauthResumeClientName(runtime, oauthResume),
       csrf: account.csrf,
       message: "Targetprocess MCP settings saved.",
       messageKind: "info",
       personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
       resume,
       oauthResume,
+      tokenInvalid: false,
     }))
     return
   }
 
   const credential = accountCredentialFromBody(body)
-  const settings = accountSettingsFromBody(body)
+  const settings = personalSettingsFromBody(body, await getDisplayAccount(runtime, account.user.id))
   try {
     await validateTargetprocessCredential(runtime, credential)
   } catch (error) {
@@ -307,12 +379,14 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
       email: account.user.email,
       account: await getDisplayAccount(runtime, account.user.id),
       sharedTokenAvailable: Boolean(runtime.config.tpSharedToken),
+      clientName: oauthResumeClientName(runtime, oauthResume),
       csrf: account.csrf,
       message: "Targetprocess rejected that token. Create or copy a personal access token and try again.",
       messageKind: "error",
       personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
       resume,
       oauthResume,
+      tokenInvalid: Boolean(oauthResume),
     }))
     return
   }
@@ -325,12 +399,14 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
     email: account.user.email,
     account: await getDisplayAccount(runtime, account.user.id),
     sharedTokenAvailable: Boolean(runtime.config.tpSharedToken),
+    clientName: oauthResumeClientName(runtime, oauthResume),
     csrf: account.csrf,
     message: oauthResume ? "Targetprocess credential saved. Review your configuration, then finish the MCP login." : "Targetprocess credential saved.",
     messageKind: "info",
     personalAccessTokensUrl: runtime.config.tpPersonalAccessTokensUrl,
     resume,
     oauthResume,
+    tokenInvalid: false,
   }))
 }
 
@@ -537,7 +613,7 @@ type AccountPostBody = {
   resume?: string
   credential_kind?: string
   credentialKind?: string
-  action?: "revoke" | "settings" | "shared" | "token" | "finish_oauth"
+  action?: "revoke" | "deregister" | "settings" | "shared" | "token" | "finish_oauth" | "finish_shared_oauth" | "save_personal_finish_oauth"
   oauth_resume?: string
   access_mode?: string
   allow_deletes?: string
@@ -641,6 +717,26 @@ function accountSettingsFromBody(body: AccountPostBody): { accessMode: AccessMod
   return { accessMode, policy }
 }
 
+function personalSettingsFromBody(body: AccountPostBody, fallbackAccount: TargetprocessAccount): { accessMode: AccessMode; policy: TargetprocessAccessPolicy } {
+  const hasPolicyFields = [
+    body.allow_deletes,
+    body.allow_relation_deletes,
+    body.allow_creates,
+    body.create_limit_per_hour,
+    body.allow_comments,
+    body.comment_limit_per_hour,
+    body.allow_updates,
+    body.allow_attachments,
+    body.allow_labels,
+    body.allow_relations,
+    body.allow_test_writes,
+    body.allow_time_logging,
+  ].some((value) => value !== undefined)
+  return hasPolicyFields
+    ? accountSettingsFromBody({ ...body, access_mode: "personal" })
+    : { accessMode: "personal", policy: fallbackAccount.accessMode === "personal" ? normalizePolicy(fallbackAccount.policy) : defaultAccessPolicy }
+}
+
 function checked(value: string | undefined): boolean {
   return value === "on" || value === "true" || value === "1"
 }
@@ -682,6 +778,69 @@ function validOAuthResumeId(runtime: Runtime, rawId: string | null | undefined):
   return oauthResumeStore(runtime).has(rawId) ? rawId : ""
 }
 
+async function closeUserSessions(runtime: Runtime, userId: string): Promise<void> {
+  const closes: Promise<void>[] = []
+  for (const [sessionId, record] of runtime.sessions) {
+    if (record.userId !== userId) continue
+    runtime.sessions.delete(sessionId)
+    closes.push(record.transport.close().catch(() => undefined))
+  }
+  await Promise.all(closes)
+}
+
+function deleteOAuthResumesForUser(runtime: Runtime, userId: string): void {
+  cleanupOAuthResumes(runtime)
+  const store = oauthResumeStore(runtime)
+  let changed = false
+  for (const [id, record] of store) {
+    if (record.user.id === userId) {
+      store.delete(id)
+      changed = true
+    }
+  }
+  if (changed) persistOAuthResumes(runtime)
+}
+
+function getOAuthResume(runtime: Runtime, id: string, userId: string): OAuthAuthorizationResume | null {
+  cleanupOAuthResumes(runtime)
+  const record = oauthResumeStore(runtime).get(id)
+  if (!record || record.user.id !== userId) return null
+  const { expiresAt: _expiresAt, ...resume } = record
+  return resume
+}
+
+function lookupOAuthResume(runtime: Runtime, id: string, userId: string): OAuthAuthorizationResume | null {
+  return getOAuthResume(runtime, id, userId) || getConsumedOAuthResume(runtime, id, userId)
+}
+
+function oauthResumeClientName(runtime: Runtime, id: string): string {
+  if (!id) return ""
+  const record = oauthResumeStore(runtime).get(id)
+  if (!record) return ""
+  return runtime.config.oauthClients.get(record.clientId)?.name || record.clientId
+}
+
+function completeOAuthResume(runtime: Runtime, id: string, userId: string): OAuthAuthorizationResume | null {
+  const consumed = takeOAuthResume(runtime, id, userId)
+  if (consumed) {
+    consumedOAuthResumeStore(runtime).set(id, {
+      ...consumed,
+      expiresAt: Date.now() + consumedOAuthResumeRetryMs,
+    })
+    cleanupConsumedOAuthResumes(runtime)
+    return consumed
+  }
+  return getConsumedOAuthResume(runtime, id, userId)
+}
+
+function getConsumedOAuthResume(runtime: Runtime, id: string, userId: string): OAuthAuthorizationResume | null {
+  cleanupConsumedOAuthResumes(runtime)
+  const record = consumedOAuthResumeStore(runtime).get(id)
+  if (!record || record.user.id !== userId) return null
+  const { expiresAt: _expiresAt, ...resume } = record
+  return resume
+}
+
 function takeOAuthResume(runtime: Runtime, id: string, userId: string): OAuthAuthorizationResume | null {
   cleanupOAuthResumes(runtime)
   const store = oauthResumeStore(runtime)
@@ -691,6 +850,18 @@ function takeOAuthResume(runtime: Runtime, id: string, userId: string): OAuthAut
   if (!record || record.user.id !== userId) return null
   const { expiresAt: _expiresAt, ...resume } = record
   return resume
+}
+
+function consumedOAuthResumeStore(runtime: Runtime): Map<string, OAuthResumeRecord> {
+  runtime.consumedOAuthResumes ||= new Map()
+  return runtime.consumedOAuthResumes
+}
+
+function cleanupConsumedOAuthResumes(runtime: Runtime): void {
+  const now = Date.now()
+  for (const [id, record] of consumedOAuthResumeStore(runtime)) {
+    if (record.expiresAt <= now) consumedOAuthResumeStore(runtime).delete(id)
+  }
 }
 
 function cleanupOAuthResumes(runtime: Runtime): void {
@@ -901,28 +1072,43 @@ function accountPage({
   email,
   account,
   sharedTokenAvailable,
+  clientName,
   csrf,
   message,
   messageKind,
   personalAccessTokensUrl,
   resume,
   oauthResume,
+  tokenInvalid,
 }: {
   email: string
   account: TargetprocessAccount
   sharedTokenAvailable: boolean
+  clientName: string
   csrf: string
   message: string
   messageKind: "info" | "error"
   personalAccessTokensUrl: string
   resume: string
   oauthResume: string
+  tokenInvalid: boolean
 }): string {
   const policy = account.accessMode === "shared" ? sharedTokenPolicy : normalizePolicy(account.policy)
   const hiddenResume = hiddenResumeFields(resume, oauthResume)
   const hasPersonalToken = account.credential?.kind === "targetprocess_access_token"
   const isShared = account.accessMode === "shared"
-  const canFinish = Boolean(oauthResume && (account.credential || (isShared && sharedTokenAvailable)))
+  const mode = oauthResume ? "oauth_connect" : "account_settings"
+  const accessChoice: AccessMode = hasPersonalToken ? "personal" : sharedTokenAvailable ? "shared" : "personal"
+  const canFinish = Boolean(oauthResume && !tokenInvalid && (hasPersonalToken || sharedTokenAvailable || account.credential))
+  const view = {
+    mode,
+    accessChoice,
+    canFinish,
+    hasPersonalToken,
+    sharedTokenAvailable,
+    clientName,
+    tokenInvalid,
+  }
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -930,68 +1116,193 @@ function accountPage({
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Targetprocess MCP</title>
   <style>
-    body { font: 16px/1.4 system-ui, sans-serif; max-width: 42rem; margin: 4rem auto; padding: 0 1rem; color: #17202a; }
+    :root { color-scheme: light; --ink: #17202a; --muted: #5b6773; --line: #cfd7df; --soft: #f5f7f9; --ok: #eef6ee; --err: #fdecec; --accent: #155e75; }
+    body { font: 16px/1.45 system-ui, sans-serif; max-width: 48rem; margin: 3rem auto; padding: 0 1rem; color: var(--ink); background: #fff; }
+    h1 { margin: 0 0 .5rem; font-size: 2rem; line-height: 1.15; }
+    h2 { margin: 1.5rem 0 .5rem; font-size: 1.2rem; }
+    h3 { margin: 0 0 .35rem; font-size: 1rem; }
+    p { margin: .45rem 0; }
     label, input, button, select { box-sizing: border-box; }
     label { display: block; margin: .6rem 0 .25rem; font-weight: 600; }
-    input[type="password"], input[type="number"], select { width: 100%; margin: .2rem 0 1rem; padding: .65rem; }
+    input[type="password"], input[type="number"], select { width: 100%; margin: .2rem 0 1rem; padding: .65rem; border: 1px solid var(--line); border-radius: 6px; }
     .check label { display: flex; gap: .5rem; align-items: center; font-weight: 400; margin: .45rem 0; }
-    button { width: auto; padding: .55rem .8rem; }
-    .status { margin: 1rem 0; padding: .75rem; background: #eef6ee; }
-    .error { margin: 1rem 0; padding: .75rem; background: #fdecec; }
-    fieldset { margin: 1.25rem 0; padding: 1rem; border: 1px solid #ccd3da; }
+    button { width: auto; padding: .65rem .9rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: white; font-weight: 700; cursor: pointer; }
+    button.secondary { border-color: var(--line); background: white; color: var(--ink); }
+    .status { margin: 1rem 0; padding: .75rem; background: var(--ok); border-radius: 6px; }
+    .error { margin: 1rem 0; padding: .75rem; background: var(--err); border-radius: 6px; }
+    fieldset { margin: 1.25rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: 6px; }
     legend { font-weight: 700; }
-    .muted { color: #5b6773; }
+    .muted { color: var(--muted); }
     .actions { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; }
     .danger { margin-top: 1rem; }
+    .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin: 1rem 0; }
+    .summary div, .option, .ready { border: 1px solid var(--line); border-radius: 6px; padding: .9rem; background: var(--soft); }
+    .summary strong { display: block; margin-top: .15rem; }
+    .option { margin: .75rem 0; background: #fff; }
+    .option label { display: flex; gap: .5rem; align-items: flex-start; margin: 0; }
+    .option-body { margin-top: .75rem; }
+    .token-panel { display: none; }
+    .option:has(input[data-toggle-panel]:checked) .token-panel { display: block; }
+    details { margin: 1rem 0; }
+    summary { cursor: pointer; font-weight: 700; }
+    .readonly-list { margin: .75rem 0 0; padding-left: 1.25rem; }
+    .step { font-size: .9rem; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+    @media (max-width: 620px) { body { margin-top: 1.5rem; } .summary { grid-template-columns: 1fr; } .actions button { width: 100%; } }
   </style>
 </head>
 <body>
-  <h1>Targetprocess MCP</h1>
-  <p>Signed in as ${escapeHtml(email)}.</p>
   ${message ? `<p class="${messageKind === "error" ? "error" : "status"}">${escapeHtml(message)}</p>` : ""}
-  <p>Access mode: <strong>${isShared ? "service token" : "personal Targetprocess token"}</strong>.</p>
-  <p>Personal token status: <strong>${hasPersonalToken ? "saved" : "not saved"}</strong>.</p>
-
-  <form method="post">
-    <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
-    ${hiddenResume}
-    <fieldset>
-      <legend>Credential</legend>
-      <label for="access_mode">Token mode</label>
-      <select id="access_mode" name="access_mode">
-        <option value="shared"${isShared ? " selected" : ""}${sharedTokenAvailable ? "" : " disabled"}>Use service token for read and attributed comments</option>
-        <option value="personal"${!isShared ? " selected" : ""}>Use my personal Targetprocess token</option>
-      </select>
-      ${sharedTokenAvailable ? "" : `<p class="muted">Service token mode is not configured on this server.</p>`}
-      <p class="muted">
-        Open <a href="${escapeHtml(personalAccessTokensUrl)}" target="_blank" rel="noopener noreferrer">Targetprocess personal access tokens</a>
-        in a new tab to create or copy a personal token.
-      </p>
-      <label for="token">Replace personal Targetprocess token</label>
-      <input id="token" name="token" type="password" autocomplete="off">
-    </fieldset>
-    ${policyFields(policy)}
-    <div class="actions">
-      <button type="submit" name="action" value="settings">Save configuration</button>
-      <button type="submit" name="action" value="token">Save personal token and configuration</button>
-    </div>
-  </form>
-  ${canFinish ? `
-  <form method="post" class="status">
-    <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
-    <input type="hidden" name="action" value="finish_oauth">
-    ${hiddenResume}
-    <button type="submit">Finish MCP login</button>
-  </form>` : ""}
-  ${hasPersonalToken ? `
-  <form class="danger" method="post">
-    <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
-    <input type="hidden" name="action" value="revoke">
-    ${hiddenResume}
-    <button type="submit">Revoke personal token</button>
-  </form>` : ""}
+  ${view.mode === "oauth_connect"
+    ? oauthConnectContent({ email, csrf, hiddenResume, personalAccessTokensUrl, policy, view })
+    : accountSettingsContent({ email, csrf, hiddenResume, personalAccessTokensUrl, policy, hasPersonalToken, isShared, sharedTokenAvailable })}
 </body>
 </html>`
+}
+
+function oauthConnectContent({
+  email,
+  csrf,
+  hiddenResume,
+  personalAccessTokensUrl,
+  policy,
+  view,
+}: {
+  email: string
+  csrf: string
+  hiddenResume: string
+  personalAccessTokensUrl: string
+  policy: TargetprocessAccessPolicy
+  view: {
+    accessChoice: AccessMode
+    canFinish: boolean
+    hasPersonalToken: boolean
+    sharedTokenAvailable: boolean
+    clientName: string
+    tokenInvalid: boolean
+  }
+}): string {
+  const client = view.clientName || "your MCP client"
+  if (view.tokenInvalid) {
+    return `
+      <p class="step">Step 1 of 1</p>
+      <h1>Connect Targetprocess MCP</h1>
+      <p>Signed in as ${escapeHtml(email)}. Save a current Targetprocess personal access token to continue to ${escapeHtml(client)}.</p>
+      ${personalTokenFinishForm({ csrf, hiddenResume, personalAccessTokensUrl, policy, autofocus: true, buttonLabel: "Save token and continue" })}`
+  }
+  if (view.hasPersonalToken && view.canFinish) {
+    return `
+      <p class="step">Ready to connect</p>
+      <h1>Connect Targetprocess MCP</h1>
+      <p>Signed in as ${escapeHtml(email)}. Your saved Targetprocess personal token is ready for this connection.</p>
+      <form method="post" class="ready">
+        <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+        <input type="hidden" name="action" value="finish_oauth">
+        ${hiddenResume}
+        <button type="submit">Continue to ${escapeHtml(client)}</button>
+      </form>`
+  }
+  return `
+    <p class="step">Choose access</p>
+    <h1>Connect Targetprocess MCP</h1>
+    <p>Signed in as ${escapeHtml(email)}. Choose how this MCP connection should access Targetprocess.</p>
+    <form method="post">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+      ${hiddenResume}
+      ${view.sharedTokenAvailable ? `
+      <section class="option">
+        <label>
+          <input type="radio" name="access_mode" value="shared" data-toggle-panel${view.accessChoice === "shared" ? " checked" : ""}>
+          <span><strong>Limited service access</strong><br><span class="muted">Read, search, list, and add attributed comments. Create, update, delete, attachment, relation, label, test, and time logging tools stay unavailable.</span></span>
+        </label>
+        <div class="option-body token-panel" data-panel="shared">
+          <div class="actions">
+            <button type="submit" name="action" value="finish_shared_oauth">Continue to ${escapeHtml(client)}</button>
+          </div>
+        </div>
+      </section>` : ""}
+      <section class="option">
+        <label>
+          <input type="radio" name="access_mode" value="personal" data-toggle-panel${view.accessChoice === "personal" ? " checked" : ""}>
+          <span><strong>Use my personal token</strong><br><span class="muted">Use your Targetprocess permissions and optional agent permission limits.</span></span>
+        </label>
+        <div class="option-body token-panel" data-panel="personal">
+          ${personalTokenFields(personalAccessTokensUrl, !view.sharedTokenAvailable)}
+          <details>
+            <summary>Customize personal-token permissions</summary>
+            ${policyFields(policy)}
+          </details>
+          <div class="actions">
+            <button type="submit" name="action" value="save_personal_finish_oauth">Save token and continue</button>
+          </div>
+        </div>
+      </section>
+    </form>`
+}
+
+function accountSettingsContent({
+  email,
+  csrf,
+  hiddenResume,
+  personalAccessTokensUrl,
+  policy,
+  hasPersonalToken,
+  isShared,
+  sharedTokenAvailable,
+}: {
+  email: string
+  csrf: string
+  hiddenResume: string
+  personalAccessTokensUrl: string
+  policy: TargetprocessAccessPolicy
+  hasPersonalToken: boolean
+  isShared: boolean
+  sharedTokenAvailable: boolean
+}): string {
+  return `
+    <h1>Targetprocess MCP account settings</h1>
+    <p>Signed in as ${escapeHtml(email)}.</p>
+    <div class="summary">
+      <div>Current access mode<strong>${isShared ? "Limited service access" : "Personal Targetprocess token"}</strong></div>
+      <div>Personal token status<strong>${hasPersonalToken ? "saved" : "not saved"}</strong></div>
+    </div>
+    <form method="post">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+      ${hiddenResume}
+      <fieldset>
+        <legend>Access mode</legend>
+        <label for="access_mode">Token mode</label>
+        <select id="access_mode" name="access_mode">
+          <option value="shared"${isShared ? " selected" : ""}${sharedTokenAvailable ? "" : " disabled"}>Limited service access</option>
+          <option value="personal"${!isShared ? " selected" : ""}>Personal Targetprocess token</option>
+        </select>
+        ${sharedTokenAvailable ? "" : `<p class="muted">Service token mode is not configured on this server.</p>`}
+      </fieldset>
+      ${isShared ? sharedPermissionsSummary() : policyFields(policy)}
+      <div class="actions">
+        <button type="submit" name="action" value="settings">Save settings</button>
+      </div>
+    </form>
+    <details>
+      <summary>Replace personal token</summary>
+      <form method="post">
+        <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+        ${hiddenResume}
+        ${personalTokenFields(personalAccessTokensUrl, false)}
+        <button type="submit" name="action" value="token">Save personal token and settings</button>
+      </form>
+    </details>
+    ${hasPersonalToken ? `
+    <form class="danger" method="post">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+      <input type="hidden" name="action" value="revoke">
+      ${hiddenResume}
+      <button class="secondary" type="submit">Revoke personal token</button>
+    </form>` : ""}
+    <form class="danger" method="post">
+      <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+      <input type="hidden" name="action" value="deregister">
+      <button class="secondary" type="submit">Deregister and sign out</button>
+    </form>`
 }
 
 function hiddenResumeFields(resume: string, oauthResume: string): string {
@@ -1003,7 +1314,7 @@ function hiddenResumeFields(resume: string, oauthResume: string): string {
 
 function policyFields(policy: TargetprocessAccessPolicy): string {
   return `<fieldset>
-    <legend>Safety limits</legend>
+    <legend>Agent permissions</legend>
     <div class="check">
       ${checkbox("allow_deletes", "Allow ticket deletion", policy.allowDeletes)}
       ${checkbox("allow_relation_deletes", "Allow relation deletion", policy.allowRelationDeletes)}
@@ -1025,6 +1336,54 @@ function policyFields(policy: TargetprocessAccessPolicy): string {
       ${checkbox("allow_time_logging", "Allow time logging", policy.allowTimeLogging)}
     </div>
   </fieldset>`
+}
+
+function personalTokenFinishForm({
+  csrf,
+  hiddenResume,
+  personalAccessTokensUrl,
+  policy,
+  autofocus,
+  buttonLabel,
+}: {
+  csrf: string
+  hiddenResume: string
+  personalAccessTokensUrl: string
+  policy: TargetprocessAccessPolicy
+  autofocus: boolean
+  buttonLabel: string
+}): string {
+  return `<form method="post">
+    <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+    ${hiddenResume}
+    ${personalTokenFields(personalAccessTokensUrl, autofocus)}
+    <details>
+      <summary>Customize personal-token permissions</summary>
+      ${policyFields(policy)}
+    </details>
+    <button type="submit" name="action" value="save_personal_finish_oauth">${escapeHtml(buttonLabel)}</button>
+  </form>`
+}
+
+function personalTokenFields(personalAccessTokensUrl: string, autofocus: boolean): string {
+  return `<p class="muted">
+    Open <a href="${escapeHtml(personalAccessTokensUrl)}" target="_blank" rel="noopener noreferrer">Targetprocess personal access tokens</a>
+    in a new tab to create or copy a personal token.
+  </p>
+  <label for="token">Targetprocess personal access token</label>
+  <input id="token" name="token" type="password" autocomplete="off"${autofocus ? " autofocus" : ""}>`
+}
+
+function sharedPermissionsSummary(): string {
+  return `<section>
+    <h2>Agent permissions</h2>
+    <p class="muted">Service-token mode uses fixed server-side permissions.</p>
+    <ul class="readonly-list">
+      <li>Read, search, get, and list tools are available.</li>
+      <li>Comments are available with a limit of ${sharedTokenPolicy.commentLimitPerHour} per hour.</li>
+      <li>Create, update, delete, attachment, label, relation, test write, and time logging tools are unavailable.</li>
+    </ul>
+  </section>`
 }
 
 function checkbox(name: string, label: string, checkedValue: boolean): string {
