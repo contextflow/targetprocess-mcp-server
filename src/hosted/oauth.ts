@@ -8,6 +8,7 @@ import {
   decodeJwtHeader,
   randomBase64Url,
   safeEqual,
+  sha256Base64Url,
   signJwt,
   verifyAsymmetricJwtSignature,
   verifyHmacJwt,
@@ -72,6 +73,8 @@ type RefreshGrant = {
   clientId: string
   scopes: string[]
   expiresAt: number
+  familyId: string
+  refreshTokenRole: "current" | "previous"
 }
 
 type OAuthStateFile = {
@@ -326,26 +329,61 @@ export class OAuthBroker {
   private exchangeRefreshToken(form: URLSearchParams, authorizationHeader?: string): Record<string, unknown> {
     const client = this.authenticateClient(form, authorizationHeader)
     const refreshToken = form.get("refresh_token") || ""
-    const grant = this.refreshTokens.get(refreshToken)
-    this.refreshTokens.delete(refreshToken)
-    this.persistState()
+    const refreshTokenHash = refreshTokenId(refreshToken)
+    const grant = this.refreshTokens.get(refreshTokenHash)
 
     if (!grant || grant.expiresAt <= Date.now() || grant.clientId !== client.clientId) {
+      if (grant) {
+        this.revokeRefreshFamily(grant.familyId)
+        this.persistState()
+      }
       throw new OAuthHttpError(400, "invalid_grant")
     }
-    return this.issueTokens(grant.user, client.clientId, grant.scopes)
+    return this.rotateRefreshToken(refreshTokenHash, grant)
   }
 
   private issueTokens(user: OAuthUser, clientId: string, scopes: string[]): Record<string, unknown> {
     const refreshToken = randomBase64Url(48)
-    this.refreshTokens.set(refreshToken, {
+    this.refreshTokens.set(refreshTokenId(refreshToken), {
       user,
       clientId,
       scopes,
-      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      expiresAt: refreshTokenExpiresAt(),
+      familyId: randomBase64Url(16),
+      refreshTokenRole: "current",
     })
     this.persistState()
+    return this.buildTokenResponse(user, clientId, scopes, refreshToken)
+  }
 
+  private rotateRefreshToken(providedRefreshTokenHash: string, grant: RefreshGrant): Record<string, unknown> {
+    const refreshToken = randomBase64Url(48)
+    const expiresAt = refreshTokenExpiresAt()
+
+    for (const [key, candidate] of this.refreshTokens) {
+      if (candidate.familyId === grant.familyId && key !== providedRefreshTokenHash) {
+        this.refreshTokens.delete(key)
+      }
+    }
+
+    // Cloudflare-style rotation: keep the token used for this request as the one previous token
+    // until the client proves it has advanced by using a newer token.
+    // Prior art: https://github.com/cloudflare/workers-oauth-provider/blob/main/src/oauth-provider.ts#L2643-L2654
+    this.refreshTokens.set(providedRefreshTokenHash, {
+      ...grant,
+      expiresAt,
+      refreshTokenRole: "previous",
+    })
+    this.refreshTokens.set(refreshTokenId(refreshToken), {
+      ...grant,
+      expiresAt,
+      refreshTokenRole: "current",
+    })
+    this.persistState()
+    return this.buildTokenResponse(grant.user, grant.clientId, grant.scopes, refreshToken)
+  }
+
+  private buildTokenResponse(user: OAuthUser, clientId: string, scopes: string[], refreshToken: string): Record<string, unknown> {
     const accessToken = signJwt({
       sub: user.id,
       aud: this.config.resource,
@@ -365,6 +403,12 @@ export class OAuthBroker {
       expires_in: 60 * 15,
       refresh_token: refreshToken,
       scope: scopes.join(" "),
+    }
+  }
+
+  private revokeRefreshFamily(familyId: string): void {
+    for (const [key, grant] of this.refreshTokens) {
+      if (grant.familyId === familyId) this.refreshTokens.delete(key)
     }
   }
 
@@ -537,8 +581,14 @@ export class OAuthBroker {
       if (parsed.version !== 1) return
       for (const [key, value] of Object.entries(parsed.pending || {})) this.pending.set(key, value)
       for (const [key, value] of Object.entries(parsed.codes || {})) this.codes.set(key, value)
-      for (const [key, value] of Object.entries(parsed.refreshTokens || {})) this.refreshTokens.set(key, value)
+      let migrated = false
+      for (const [key, value] of Object.entries(parsed.refreshTokens || {})) {
+        const [storedKey, grant, changed] = normalizeRefreshGrant(key, value)
+        this.refreshTokens.set(storedKey, grant)
+        migrated ||= changed
+      }
       this.cleanup()
+      if (migrated) this.persistState()
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
     }
@@ -632,4 +682,24 @@ function stringClaim(value: unknown, name: string): string {
 function arrayClaim(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === "string")
+}
+
+function refreshTokenId(refreshToken: string): string {
+  return sha256Base64Url(refreshToken)
+}
+
+function refreshTokenExpiresAt(): number {
+  return Date.now() + 30 * 24 * 60 * 60 * 1000
+}
+
+function normalizeRefreshGrant(key: string, value: RefreshGrant): [string, RefreshGrant, boolean] {
+  const hasFamily = typeof value.familyId === "string" && value.familyId.length > 0
+  const hasRole = value.refreshTokenRole === "current" || value.refreshTokenRole === "previous"
+  const isHashedKey = /^[A-Za-z0-9_-]{43}$/.test(key)
+  const storedKey = isHashedKey ? key : refreshTokenId(key)
+  return [storedKey, {
+    ...value,
+    familyId: hasFamily ? value.familyId : randomBase64Url(16),
+    refreshTokenRole: hasRole ? value.refreshTokenRole : "current",
+  }, !isHashedKey || !hasFamily || !hasRole]
 }

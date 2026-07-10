@@ -1,5 +1,5 @@
 import { createSign, generateKeyPairSync } from 'crypto'
-import { mkdtemp } from 'fs/promises'
+import { mkdtemp, readFile, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -100,6 +100,121 @@ describe('hosted OAuth state persistence', () => {
     })
     expect(tokens.access_token).toEqual(expect.any(String))
     expect(tokens.refresh_token).toEqual(expect.any(String))
+  })
+
+  it('keeps one previous refresh token valid until the client advances', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tp-mcp-oauth-state-'))
+    const statePath = join(dir, 'oauth-state.json')
+    const config = hostedConfig(statePath)
+    const verifier = 'codex-local-verifier'
+    const redirectUri = 'http://127.0.0.1:48123/callback/random'
+    const redirect = new OAuthBroker(config).buildClientAuthorizationRedirect({
+      user: { id: 'user-1', email: 'user@example.com', groups: [] },
+      clientId: 'codex-local',
+      redirectUri,
+      scopes: ['mcp:tools'],
+      codeChallenge: sha256Base64Url(verifier),
+    })
+    const code = new URL(redirect).searchParams.get('code') || ''
+    const initialTokens = new OAuthBroker(config).exchangeToken(new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+      client_id: 'codex-local',
+      code_verifier: verifier,
+    }))
+    const refreshToken1 = String(initialTokens.refresh_token)
+    const initialState = await readFile(statePath, 'utf8')
+    expect(initialState).not.toContain(refreshToken1)
+    expect(JSON.parse(initialState).refreshTokens).toHaveProperty(sha256Base64Url(refreshToken1))
+
+    const refreshed2 = new OAuthBroker(config).exchangeToken(new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken1,
+      client_id: 'codex-local',
+    }))
+    const refreshToken2 = String(refreshed2.refresh_token)
+
+    const refreshed3 = new OAuthBroker(config).exchangeToken(new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken1,
+      client_id: 'codex-local',
+    }))
+    const refreshToken3 = String(refreshed3.refresh_token)
+    expect(refreshToken3).toEqual(expect.any(String))
+    expect(refreshToken3).not.toBe(refreshToken2)
+
+    const refreshed4 = new OAuthBroker(config).exchangeToken(new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken3,
+      client_id: 'codex-local',
+    }))
+    const refreshToken4 = String(refreshed4.refresh_token)
+
+    expect(refreshToken4).toEqual(expect.any(String))
+    expect(() => new OAuthBroker(config).exchangeToken(new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken1,
+      client_id: 'codex-local',
+    }))).toThrow('invalid_grant')
+    expect(() => new OAuthBroker(config).exchangeToken(new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken2,
+      client_id: 'codex-local',
+    }))).toThrow('invalid_grant')
+
+    const finalState = await readFile(statePath, 'utf8')
+    expect(finalState).not.toContain(refreshToken1)
+    expect(finalState).not.toContain(refreshToken2)
+    expect(finalState).not.toContain(refreshToken3)
+    expect(finalState).not.toContain(refreshToken4)
+    expect(finalState).not.toContain('tokenResponse')
+    expect(JSON.parse(finalState).refreshTokens).toHaveProperty(sha256Base64Url(refreshToken4))
+  })
+
+  it('migrates legacy raw refresh-token state to hashed refresh-token families', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tp-mcp-oauth-state-'))
+    const statePath = join(dir, 'oauth-state.json')
+    const config = hostedConfig(statePath)
+    const legacyRefreshToken = 'legacy-refresh-token'
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      pending: {},
+      codes: {},
+      refreshTokens: {
+        [legacyRefreshToken]: {
+          user: { id: 'user-1', email: 'user@example.com', groups: [] },
+          clientId: 'codex-local',
+          scopes: ['mcp:tools'],
+          expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+        },
+      },
+      refreshReplays: {
+        ignored: {
+          clientId: 'codex-local',
+          userId: 'user-1',
+          tokenResponse: { refresh_token: 'must-not-persist' },
+          expiresAt: Date.now() + 60_000,
+        },
+      },
+    }))
+
+    const refreshed = new OAuthBroker(config).exchangeToken(new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: legacyRefreshToken,
+      client_id: 'codex-local',
+    }))
+    const newRefreshToken = String(refreshed.refresh_token)
+    const migratedState = await readFile(statePath, 'utf8')
+    const parsed = JSON.parse(migratedState)
+
+    expect(newRefreshToken).toEqual(expect.any(String))
+    expect(migratedState).not.toContain(legacyRefreshToken)
+    expect(migratedState).not.toContain('must-not-persist')
+    expect(migratedState).not.toContain('tokenResponse')
+    expect(parsed.refreshReplays).toBeUndefined()
+    expect(parsed.refreshTokens).toHaveProperty(sha256Base64Url(legacyRefreshToken))
+    expect(parsed.refreshTokens).toHaveProperty(sha256Base64Url(newRefreshToken))
   })
 
   it('accepts a verified Google Workspace user with a matching hosted-domain claim', async () => {
