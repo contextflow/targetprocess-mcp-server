@@ -210,7 +210,7 @@ TP_TOKEN_ENCRYPTION_KEY_B64=<32-byte-base64-key> \
 MCP_METRICS_BEARER_TOKEN=<metrics-scrape-token> \
 TP_TOKEN_STORE_PATH=/var/lib/targetprocess-mcp/user-tokens.json \
 MCP_OAUTH_STATE_STORE_PATH=/var/lib/targetprocess-mcp/oauth-state.json \
-MCP_OAUTH_CLIENTS_JSON='[{"client_id":"claude-org","name":"Claude org connector","redirect_uris":["https://..."],"allowed_origins":["https://claude.ai"]}]' \
+MCP_OAUTH_CLIENTS_JSON='[{"client_id":"claude-org","name":"Claude org connector","redirect_uris":["https://..."],"allowed_origins":["https://claude.ai"]},{"client_id":"codex-local","name":"Codex local","redirect_uris":["http://127.0.0.1/callback"],"access_token_ttl_seconds":28800}]' \
 OIDC_ISSUER_URL=https://accounts.google.com \
 OIDC_CLIENT_ID=<google-oauth-client-id> \
 OIDC_CLIENT_SECRET=<google-oauth-client-secret> \
@@ -220,6 +220,18 @@ nix run .#hosted
 ```
 
 Users authenticate through the configured OIDC provider, then configure Targetprocess access at `/account/targetprocess`. They can save a personal access token for user-scoped writes, or use the optional `TP_SHARED_TOKEN` service-token mode for read/search/get/list plus attributed comments. The server validates personal tokens before storing them encrypted and never renders them back later. For Google Workspace, set both `OIDC_ALLOWED_DOMAINS` and `OIDC_ALLOWED_HOSTED_DOMAINS`; the latter checks Google's ID-token `hd` hosted-domain claim. The hosted server emits JSON audit logs on stdout and exposes Prometheus metrics at `/metrics` when `MCP_METRICS_BEARER_TOKEN` is set. Do not rely on `User-Agent` filtering to restrict access to Claude, Gemini, or Codex; use the OAuth client allowlist plus organization OIDC policy. See `docs/remote-mcp-deployment-notes.md` for the full deployment and security notes.
+
+For Codex CLI, register `codex-local` in `MCP_OAUTH_CLIENTS_JSON` on the hosted server, restart the server, then add the local MCP entry with:
+
+```bash
+codex mcp add targetprocess \
+  --url https://mcp.example.com/mcp \
+  --oauth-client-id codex-local \
+  --oauth-resource https://mcp.example.com/mcp
+codex mcp login targetprocess
+```
+
+`access_token_ttl_seconds` is a server-side OAuth-client setting. Use it for Codex if sessions get stuck after the default 15-minute access-token lifetime.
 
 ### Local Installation for Development
 ```json

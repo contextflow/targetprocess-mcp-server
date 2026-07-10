@@ -5,16 +5,25 @@ export type AuditEvent = {
   method?: string
   route?: string
   status?: number
+  statusClass?: string
   outcome?: string
   reason?: string
+  stage?: string
+  errorClass?: string
+  errorMessage?: string
   clientIp?: string
   userId?: string
   userEmail?: string
   clientId?: string
+  grantType?: string
   accessMode?: string
   toolName?: string
   category?: string
   targetId?: string
+  targetprocessMethod?: string
+  targetprocessPath?: string
+  targetprocessStatus?: number
+  targetprocessStatusClass?: string
   durationMs?: number
 }
 

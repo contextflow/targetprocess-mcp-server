@@ -8,6 +8,7 @@ export type OAuthClientConfig = {
   redirectUris: string[]
   allowedOrigins: string[]
   scopes: string[]
+  accessTokenTtlSeconds?: number
 }
 
 export type OidcMetadata = {
@@ -61,6 +62,8 @@ type RawOAuthClient = {
   allowed_origins?: string[]
   allowedOrigins?: string[]
   scopes?: string[]
+  access_token_ttl_seconds?: number
+  accessTokenTtlSeconds?: number
 }
 
 export async function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): Promise<HostedConfig> {
@@ -124,6 +127,11 @@ function parseOAuthClients(rawJson: string): Map<string, OAuthClientConfig> {
       redirectUris,
       allowedOrigins: rawClient.allowedOrigins || rawClient.allowed_origins || [],
       scopes: rawClient.scopes || ["mcp:tools"],
+      accessTokenTtlSeconds: parsePositiveInteger(
+        rawClient.accessTokenTtlSeconds ?? rawClient.access_token_ttl_seconds,
+        60 * 15,
+        `MCP OAuth client ${clientId} access_token_ttl_seconds`,
+      ),
     })
   }
   return clients
@@ -217,7 +225,7 @@ function domainCsv(value: string | undefined): string[] {
   return csv(value).map((item) => item.toLowerCase())
 }
 
-function parsePositiveInteger(value: string | undefined, fallback: number, name: string): number {
+function parsePositiveInteger(value: string | number | undefined, fallback: number, name: string): number {
   if (!value) return fallback
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`)

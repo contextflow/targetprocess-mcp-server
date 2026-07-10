@@ -6,7 +6,7 @@ import { JSDOM } from "jsdom";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 
-import { TpClient } from "./tp.js";
+import { TpClient, type TpRequestDiagnostic } from "./tp.js";
 import * as TP from "./types.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { handleGetProjects } from "./handlers/get_projects.js";
@@ -69,6 +69,7 @@ export type TargetprocessMcpContext = {
     outcome: "success" | "failure" | "denied"
     reason?: string
     args?: any
+    targetprocessDiagnostic?: TpRequestDiagnostic
     durationMs: number
   }) => void
 }
@@ -103,6 +104,7 @@ if (context) {
 
     const wrapped = async (args: any, extra: any) => {
       const started = Date.now()
+      tp.clearLastRequestDiagnostic()
       const blocked = await context.checkToolCall?.(name, decision.category)
       if (blocked) {
         context.auditToolCall?.({
@@ -119,21 +121,26 @@ if (context) {
       try {
         const effectiveArgs = await context.prepareToolArgs?.(name, args) || args
         const result = await callback(effectiveArgs, extra)
+        const targetprocessDiagnostic = tp.getLastRequestDiagnostic()
         context.auditToolCall?.({
           toolName: name,
           category: decision.category,
-          outcome: "success",
+          outcome: targetprocessDiagnostic ? "failure" : "success",
+          reason: targetprocessDiagnostic?.message,
           args,
+          targetprocessDiagnostic,
           durationMs: Date.now() - started,
         })
         return result
       } catch (error) {
+        const targetprocessDiagnostic = tp.getLastRequestDiagnostic()
         context.auditToolCall?.({
           toolName: name,
           category: decision.category,
           outcome: "failure",
           reason: error instanceof Error ? error.message : "tool_failed",
           args,
+          targetprocessDiagnostic,
           durationMs: Date.now() - started,
         })
         throw error

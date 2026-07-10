@@ -384,6 +384,7 @@ export class OAuthBroker {
   }
 
   private buildTokenResponse(user: OAuthUser, clientId: string, scopes: string[], refreshToken: string): Record<string, unknown> {
+    const accessTokenTtlSeconds = this.config.oauthClients.get(clientId)?.accessTokenTtlSeconds || 60 * 15
     const accessToken = signJwt({
       sub: user.id,
       aud: this.config.resource,
@@ -394,13 +395,13 @@ export class OAuthBroker {
       typ: "access_token",
     }, this.config.signingKey, {
       issuer: this.config.oauthIssuer,
-      expiresInSeconds: 60 * 15,
+      expiresInSeconds: accessTokenTtlSeconds,
     })
 
     return {
       access_token: accessToken,
       token_type: "Bearer",
-      expires_in: 60 * 15,
+      expires_in: accessTokenTtlSeconds,
       refresh_token: refreshToken,
       scope: scopes.join(" "),
     }

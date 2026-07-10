@@ -41,6 +41,7 @@ describe('hosted MCP config', () => {
     expect(config.trustProxyHeaders).toBe(true)
     expect(config.resource).toBe('https://mcp.example.com/mcp')
     expect(config.oauthClients.get('claude-org')?.redirectUris).toEqual(['https://claude.ai/api/mcp/auth/callback'])
+    expect(config.oauthClients.get('claude-org')?.accessTokenTtlSeconds).toBe(900)
     expect(config.oidc.metadata.tokenEndpoint).toBe('https://idp.example.com/token')
     expect(config.oidc.allowedDomains).toEqual([])
     expect(config.oidc.allowedHostedDomains).toEqual([])
@@ -49,6 +50,30 @@ describe('hosted MCP config', () => {
     expect(config.oauthStateStorePath).toBe('/var/lib/tp-mcp/oauth-state.json')
     expect(config.tpSharedToken).toBe('shared-token')
     expect(metadataPathForResource(config.resource)).toBe('/.well-known/oauth-protected-resource/mcp')
+  })
+
+  it('loads per-client access token TTLs from OAuth client config', async () => {
+    vi.stubEnv('TP_BASE_URL', 'https://example.tpondemand.com')
+    const { loadHostedConfig } = await import('../src/hosted/config.js')
+
+    const config = await loadHostedConfig({
+      MCP_PUBLIC_URL: 'https://mcp.example.com',
+      MCP_SIGNING_KEY_B64: key,
+      TP_TOKEN_ENCRYPTION_KEY_B64: key,
+      MCP_OAUTH_CLIENTS_JSON: JSON.stringify([{
+        client_id: 'codex-local',
+        redirect_uris: ['http://127.0.0.1/callback'],
+        access_token_ttl_seconds: 28800,
+      }]),
+      OIDC_ISSUER_URL: 'https://idp.example.com',
+      OIDC_CLIENT_ID: 'oidc-client',
+      OIDC_CLIENT_SECRET: 'oidc-secret',
+      OIDC_AUTHORIZATION_ENDPOINT: 'https://idp.example.com/authorize',
+      OIDC_TOKEN_ENDPOINT: 'https://idp.example.com/token',
+      OIDC_JWKS_URI: 'https://idp.example.com/jwks',
+    } as NodeJS.ProcessEnv)
+
+    expect(config.oauthClients.get('codex-local')?.accessTokenTtlSeconds).toBe(28800)
   })
 
   it('fails closed without an OAuth client allowlist', async () => {

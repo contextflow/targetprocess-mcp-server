@@ -102,6 +102,32 @@ describe('hosted OAuth state persistence', () => {
     expect(tokens.refresh_token).toEqual(expect.any(String))
   })
 
+  it('uses configured access token TTLs in token responses', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'tp-mcp-oauth-state-'))
+    const config = hostedConfig(join(dir, 'oauth-state.json'))
+    config.oauthClients.get('codex-local')!.accessTokenTtlSeconds = 60 * 60 * 8
+    const verifier = 'codex-local-verifier'
+    const redirectUri = 'http://127.0.0.1:48123/callback/random'
+    const redirect = new OAuthBroker(config).buildClientAuthorizationRedirect({
+      user: { id: 'user-1', email: 'user@example.com', groups: [] },
+      clientId: 'codex-local',
+      redirectUri,
+      scopes: ['mcp:tools'],
+      codeChallenge: sha256Base64Url(verifier),
+    })
+    const code = new URL(redirect).searchParams.get('code') || ''
+
+    const tokens = new OAuthBroker(config).exchangeToken(new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+      client_id: 'codex-local',
+      code_verifier: verifier,
+    }))
+
+    expect(tokens.expires_in).toBe(28800)
+  })
+
   it('keeps one previous refresh token valid until the client advances', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'tp-mcp-oauth-state-'))
     const statePath = join(dir, 'oauth-state.json')

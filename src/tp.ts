@@ -211,7 +211,7 @@ export class TpClient {
     return this.lastRequestDiagnostic
   }
 
-  private clearRequestDiagnostic(): void {
+  clearLastRequestDiagnostic(): void {
     this.lastRequestDiagnostic = undefined
   }
 
@@ -287,7 +287,7 @@ export class TpClient {
 
   private async get<T>(params: TpClientParameters): Promise<T | null> {
     let _url = this.params(this.withAuthParams(params))
-    this.clearRequestDiagnostic()
+    this.clearLastRequestDiagnostic()
     if (!this.authToken()) {
       const message = this.missingAuthMessage()
       this.recordRequestDiagnostic({
@@ -349,7 +349,7 @@ export class TpClient {
 
   private async post<T, U>(params: TpClientParameters, data: T): Promise<U | null> {
     let _url = this.params(this.withAuthParams(params))
-    this.clearRequestDiagnostic()
+    this.clearLastRequestDiagnostic()
     this.debug("TP_POST_URL", this.redactUrl(_url))
     this.debug("TP_POST_BODY", data)
     if (!this.authToken()) {
@@ -415,7 +415,7 @@ export class TpClient {
   // instead of null, so callers can surface TP's error detail to the user.
   private async postRaw<T, U>(params: TpClientParameters, data: T): Promise<TpResult<U>> {
     let _url = this.params(this.withAuthParams(params))
-    this.clearRequestDiagnostic()
+    this.clearLastRequestDiagnostic()
     this.debug("TP_POST_URL", this.redactUrl(_url))
     this.debug("TP_POST_BODY", data)
     if (!this.authToken()) {
@@ -463,9 +463,16 @@ export class TpClient {
   // response body on failure so callers can report TP's error detail.
   private async del<U>(params: TpClientParameters): Promise<TpResult<U>> {
     let _url = this.params(this.withAuthParams(params))
+    this.clearLastRequestDiagnostic()
     this.debug("TP_DELETE_URL", this.redactUrl(_url))
     if (!this.authToken()) {
-      return { ok: false, status: 0, body: this.missingAuthMessage() }
+      const message = this.missingAuthMessage()
+      this.recordRequestDiagnostic({
+        method: "DELETE",
+        url: _url,
+        message,
+      })
+      return { ok: false, status: 0, body: message }
     }
     try {
       const response = await this.fetch(_url, {
@@ -474,11 +481,22 @@ export class TpClient {
       });
       const text = await response.text()
       if (!response.ok) {
+        this.recordRequestDiagnostic({
+          method: "DELETE",
+          url: _url,
+          message: `HTTP error! status: ${response.status}`,
+          status: response.status,
+        })
         this.debug("TP_DELETE_ERROR", { status: response.status, body: text })
         return { ok: false, status: response.status, body: text }
       }
       return { ok: true, data: (text ? JSON.parse(text) : null) as U }
     } catch (error) {
+      this.recordRequestDiagnostic({
+        method: "DELETE",
+        url: _url,
+        message: this.errorMessage(error),
+      })
       console.error("Error making TP request:", error);
       return { ok: false, status: 0, body: String(error) }
     }

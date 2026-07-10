@@ -7,7 +7,7 @@ import { dirname } from "path"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import { config as appConfig } from "./config.js"
 import { createTargetprocessMcpServer } from "./index.js"
-import { TpClient, type TargetprocessAuth } from "./tp.js"
+import { TpClient, type TargetprocessAuth, type TpRequestDiagnostic } from "./tp.js"
 import { loadHostedConfig, metadataPathForResource, type HostedConfig } from "./hosted/config.js"
 import { OAuthBroker, OAuthHttpError, redirectUriAllowed, type AuthenticatedMcpRequest, type OAuthAuthorizationResume } from "./hosted/oauth.js"
 import { decideToolAccess, defaultAccessPolicy, normalizePolicy, sharedTokenPolicy, type AccessMode, type PolicyCategory, type TargetprocessAccessPolicy } from "./hosted/policy.js"
@@ -71,9 +71,16 @@ type RequestAuditInfo = {
   userId?: string
   userEmail?: string
   clientId?: string
+  grantType?: string
   reason?: string
+  failureStage?: FailureStage
+  errorClass?: string
+  errorMessage?: string
+  targetprocessDiagnostic?: TpRequestDiagnostic
   securityFailure?: boolean
 }
+
+type FailureStage = "auth" | "oauth" | "account" | "mcp_transport" | "policy" | "tool" | "targetprocess_api"
 
 export async function createHostedServer(runtime: Runtime) {
   runtime.metrics ||= new MetricsRegistry()
@@ -85,8 +92,12 @@ export async function createHostedServer(runtime: Runtime) {
     try {
       await route(runtime, req, res, audit)
     } catch (error) {
-      const handled = handleHttpError(runtime, res, error)
+      const handled = handleHttpError(runtime, res, error, audit.route)
       audit.reason = handled.reason
+      audit.failureStage = handled.failureStage
+      audit.errorClass = handled.errorClass
+      audit.errorMessage = handled.errorMessage
+      audit.targetprocessDiagnostic = handled.targetprocessDiagnostic
       audit.securityFailure = handled.securityFailure
     }
   })
@@ -150,6 +161,8 @@ async function route(runtime: Runtime, req: IncomingMessage, res: ServerResponse
   if (url.pathname === "/oauth/token") {
     if (req.method !== "POST") return methodNotAllowed(res)
     const form = await readForm(req)
+    audit.clientId = tokenRequestClientId(form, req.headers.authorization)
+    audit.grantType = reasonCode(form.get("grant_type") || undefined)
     const tokenResponse = runtime.oauth.exchangeToken(form, req.headers.authorization)
     runtime.allowEmptyUnauthenticatedMcpProbeUntil = Date.now() + 30_000
     sendJson(res, 200, tokenResponse)
@@ -298,6 +311,7 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
       await validateTargetprocessCredential(runtime, credential)
     } catch (error) {
       if (!(error instanceof OAuthHttpError) || error.code !== "targetprocess_credentials_invalid") throw error
+      markHandledFailure(audit, error, "targetprocess_credentials_invalid", "targetprocess_api")
       sendHtml(res, 400, accountPage({
         email: account.user.email,
         account: await getDisplayAccount(runtime, account.user.id),
@@ -375,6 +389,7 @@ async function handleAccount(runtime: Runtime, req: IncomingMessage, res: Server
     await validateTargetprocessCredential(runtime, credential)
   } catch (error) {
     if (!(error instanceof OAuthHttpError) || error.code !== "targetprocess_credentials_invalid") throw error
+    markHandledFailure(audit, error, "targetprocess_credentials_invalid", "targetprocess_api")
     sendHtml(res, 400, accountPage({
       email: account.user.email,
       account: await getDisplayAccount(runtime, account.user.id),
@@ -507,6 +522,26 @@ async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResp
             category: event.category,
           })
         }
+        if (event.outcome !== "success") {
+          const targetprocessDiagnostic = event.targetprocessDiagnostic
+          recordRequestFailure(runtime, {
+            ...audit,
+            reason: targetprocessDiagnostic ? targetprocessFailureReason(targetprocessDiagnostic) : toolFailureReason(event.outcome, event.reason),
+            failureStage: targetprocessDiagnostic ? "targetprocess_api" : event.outcome === "denied" ? "policy" : "tool",
+            targetprocessDiagnostic,
+          }, {
+            method: req.method,
+            route: audit.route || runtime.config.mcpPath,
+            status: targetprocessDiagnostic?.status || 200,
+            statusClass: targetprocessDiagnostic?.status ? statusClassLabel(targetprocessDiagnostic.status) : "2xx",
+            outcome: event.outcome,
+            durationMs: event.durationMs,
+            toolName: event.toolName,
+            category: event.category,
+            accessMode: account.accessMode,
+            targetId: targetIdFromArgs(event.args),
+          })
+        }
         runtime.auditLog?.({
           event: "tool_call",
           requestId: audit.requestId,
@@ -520,6 +555,10 @@ async function handleMcp(runtime: Runtime, req: IncomingMessage, res: ServerResp
           targetId: targetIdFromArgs(event.args),
           outcome: event.outcome,
           reason: reasonCode(event.reason),
+          targetprocessMethod: event.targetprocessDiagnostic?.method,
+          targetprocessPath: targetprocessPath(event.targetprocessDiagnostic),
+          targetprocessStatus: event.targetprocessDiagnostic?.status,
+          targetprocessStatusClass: event.targetprocessDiagnostic?.status ? statusClassLabel(event.targetprocessDiagnostic.status) : undefined,
           durationMs: event.durationMs,
         })
       },
@@ -659,7 +698,7 @@ async function validateTargetprocessCredential(runtime: Runtime, credential: Tar
   })
   const context = await tp.getContext<{ LoggedUser?: { Id?: number | string } }>()
   if (!context?.LoggedUser?.Id) {
-    throw new OAuthHttpError(400, "targetprocess_credentials_invalid")
+    throw withTargetprocessDiagnostic(new OAuthHttpError(400, "targetprocess_credentials_invalid"), tp.getLastRequestDiagnostic())
   }
 }
 
@@ -940,7 +979,7 @@ function finishRequestAudit(
   const durationMs = Number(process.hrtime.bigint() - started) / 1_000_000
   const status = res.statusCode || 500
   const outcome = status >= 500 ? "failure" : status >= 400 ? "rejected" : "success"
-  const statusClass = `${Math.floor(status / 100)}xx`
+  const statusClass = statusClassLabel(status)
   const route = audit.route || normalizedRoute(runtime.config, requestUrl(runtime.config, req))
   const reason = audit.reason || statusReason(status)
 
@@ -961,6 +1000,14 @@ function finishRequestAudit(
       status_class: statusClass,
       reason,
     })
+    recordRequestFailure(runtime, audit, {
+      method: req.method,
+      route,
+      status,
+      statusClass,
+      outcome,
+      durationMs: Math.round(durationMs),
+    })
   }
   if (audit.securityFailure) {
     runtime.metrics?.increment("targetprocess_mcp_security_failures_total", "Hosted security failures.", {
@@ -979,6 +1026,7 @@ function finishRequestAudit(
       userId: audit.userId,
       userEmail: audit.userEmail,
       clientId: audit.clientId,
+      grantType: audit.grantType,
       durationMs: Math.round(durationMs),
     })
   }
@@ -995,25 +1043,108 @@ function finishRequestAudit(
     userId: audit.userId,
     userEmail: audit.userEmail,
     clientId: audit.clientId,
+    grantType: audit.grantType,
     durationMs: Math.round(durationMs),
   })
 }
 
-function handleHttpError(runtime: Runtime, res: ServerResponse, error: unknown): { reason: string; securityFailure: boolean } {
+function recordRequestFailure(
+  runtime: Runtime,
+  audit: RequestAuditInfo,
+  event: {
+    method?: string
+    route: string
+    status: number
+    statusClass: string
+    outcome: string
+    durationMs: number
+    toolName?: string
+    category?: string
+    accessMode?: string
+    targetId?: string
+  },
+): void {
+  const reason = audit.reason || statusReason(event.status)
+  const stage = audit.failureStage || failureStageForHttp(event.route, reason, Boolean(audit.securityFailure), audit.targetprocessDiagnostic)
+  const targetprocessDiagnostic = audit.targetprocessDiagnostic
+  runtime.metrics?.increment("targetprocess_mcp_request_failures_total", "Hosted MCP request failures by stage and reason.", {
+    route: event.route,
+    stage,
+    status_class: event.statusClass,
+    reason,
+  })
+  runtime.auditLog?.({
+    event: "tp_mcp_request_failure",
+    requestId: audit.requestId,
+    method: event.method,
+    route: event.route,
+    status: event.status,
+    statusClass: event.statusClass,
+    outcome: event.outcome,
+    reason,
+    stage,
+    errorClass: audit.errorClass,
+    errorMessage: audit.errorMessage,
+    clientIp: audit.clientIp,
+    userId: audit.userId,
+    userEmail: audit.userEmail,
+    clientId: audit.clientId,
+    grantType: audit.grantType,
+    accessMode: event.accessMode,
+    toolName: event.toolName,
+    category: event.category,
+    targetId: event.targetId,
+    targetprocessMethod: targetprocessDiagnostic?.method,
+    targetprocessPath: targetprocessPath(targetprocessDiagnostic),
+    targetprocessStatus: targetprocessDiagnostic?.status,
+    targetprocessStatusClass: targetprocessDiagnostic?.status ? statusClassLabel(targetprocessDiagnostic.status) : undefined,
+    durationMs: event.durationMs,
+  })
+}
+
+function handleHttpError(
+  runtime: Runtime,
+  res: ServerResponse,
+  error: unknown,
+  route: string,
+): {
+  reason: string
+  securityFailure: boolean
+  failureStage?: FailureStage
+  errorClass?: string
+  errorMessage?: string
+  targetprocessDiagnostic?: TpRequestDiagnostic
+} {
   if (res.headersSent) {
     res.end()
-    return { reason: "headers_sent", securityFailure: false }
+    return { reason: "headers_sent", securityFailure: false, failureStage: "mcp_transport" }
   }
   if (error instanceof OAuthHttpError) {
     const headers: Record<string, string> | undefined = error.status === 401
       ? { "WWW-Authenticate": runtime.oauth.wwwAuthenticateHeader() }
       : undefined
     sendJson(res, error.status, { error: error.code }, headers)
-    return { reason: error.code, securityFailure: isSecurityFailure(error.status, error.code) }
+    const targetprocessDiagnostic = targetprocessDiagnosticFromError(error)
+    const securityFailure = isSecurityFailure(error.status, error.code)
+    const reason = error.code.startsWith("targetprocess_credentials")
+      ? error.code
+      : targetprocessDiagnostic ? targetprocessFailureReason(targetprocessDiagnostic) : error.code
+    return {
+      reason,
+      securityFailure,
+      failureStage: targetprocessDiagnostic ? "targetprocess_api" : failureStageForHttp(route, error.code, securityFailure),
+      targetprocessDiagnostic,
+    }
   }
   console.error("Hosted MCP request failed:", error instanceof Error ? error.message : error)
   sendJson(res, 500, { error: "internal_server_error" })
-  return { reason: "internal_server_error", securityFailure: false }
+  return {
+    reason: "internal_server_error",
+    securityFailure: false,
+    failureStage: "mcp_transport",
+    errorClass: error instanceof Error ? error.name : typeof error,
+    errorMessage: safeErrorMessage(error),
+  }
 }
 
 function normalizedRoute(config: HostedConfig, url: URL): string {
@@ -1055,9 +1186,42 @@ function statusReason(status: number): string {
   return "ok"
 }
 
+function statusClassLabel(status: number): string {
+  return `${Math.floor(status / 100)}xx`
+}
+
 function isSecurityFailure(status: number, reason: string): boolean {
   if (status === 401 || status === 403) return true
   return reason === "invalid_host" || reason === "https_required" || reason === "invalid_origin"
+}
+
+function failureStageForHttp(
+  route: string,
+  reason: string,
+  securityFailure: boolean,
+  targetprocessDiagnostic?: TpRequestDiagnostic,
+): FailureStage {
+  if (targetprocessDiagnostic) return "targetprocess_api"
+  if (securityFailure || reason === "invalid_token" || reason === "invalid_metrics_token") return "auth"
+  if (route.startsWith("/oauth/")) return "oauth"
+  if (route === "/account/targetprocess" || reason.startsWith("targetprocess_credentials")) return "account"
+  return "mcp_transport"
+}
+
+function targetprocessFailureReason(diagnostic: TpRequestDiagnostic): string {
+  if (diagnostic.message.includes("HTTP error! status:")) return "targetprocess_http_error"
+  if (diagnostic.message.includes("Failed to parse Targetprocess JSON response")) return "targetprocess_json_parse_error"
+  if (diagnostic.message === "TP_TOKEN is required" || diagnostic.message === "Targetprocess OpenToken is required") {
+    return "targetprocess_auth_missing"
+  }
+  return "targetprocess_network_error"
+}
+
+function toolFailureReason(outcome: "failure" | "denied", reason: string | undefined): string {
+  if (outcome === "denied") {
+    return reasonCode(reason) || "policy_denied"
+  }
+  return "tool_exception"
 }
 
 function reasonCode(reason: string | undefined): string | undefined {
@@ -1066,6 +1230,45 @@ function reasonCode(reason: string | undefined): string | undefined {
   if (reason.includes("disabled in your Targetprocess MCP settings")) return "policy_disabled"
   if (reason.includes("not available when using the service Targetprocess token")) return "shared_token_policy"
   return reason.slice(0, 120)
+}
+
+function targetprocessPath(diagnostic: TpRequestDiagnostic | undefined): string | undefined {
+  if (!diagnostic?.url) return undefined
+  try {
+    return new URL(diagnostic.url).pathname
+  } catch {
+    return undefined
+  }
+}
+
+function targetprocessDiagnosticFromError(error: unknown): TpRequestDiagnostic | undefined {
+  if (!error || typeof error !== "object") return undefined
+  const diagnostic = (error as { targetprocessDiagnostic?: TpRequestDiagnostic }).targetprocessDiagnostic
+  return diagnostic && typeof diagnostic.method === "string" && typeof diagnostic.url === "string"
+    ? diagnostic
+    : undefined
+}
+
+function markHandledFailure(audit: RequestAuditInfo, error: unknown, reason: string, failureStage: FailureStage): void {
+  audit.reason = reason
+  audit.failureStage = failureStage
+  audit.targetprocessDiagnostic = targetprocessDiagnosticFromError(error)
+}
+
+function withTargetprocessDiagnostic(error: OAuthHttpError, diagnostic: TpRequestDiagnostic | undefined): OAuthHttpError {
+  if (diagnostic) {
+    ;(error as { targetprocessDiagnostic?: TpRequestDiagnostic }).targetprocessDiagnostic = diagnostic
+  }
+  return error
+}
+
+function safeErrorMessage(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !error.message) return undefined
+  return error.message
+    .replace(/access_token=[^&\s"]*/g, "access_token=***")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer ***")
+    .replace(/("?(?:token|code|client_secret|refresh_token|access_token)"?\s*[:=]\s*)("[^"]+"|[^&\s"]+)/gi, "$1***")
+    .slice(0, 160)
 }
 
 function accountPage({
@@ -1401,6 +1604,20 @@ function escapeHtml(value: string): string {
 
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value
+}
+
+function tokenRequestClientId(form: URLSearchParams, authorizationHeader: string | string[] | undefined): string | undefined {
+  const basic = headerValue(authorizationHeader)?.match(/^Basic\s+(.+)$/i)?.[1]
+  if (basic) {
+    try {
+      const decoded = Buffer.from(basic, "base64").toString("utf8")
+      const separator = decoded.indexOf(":")
+      return (separator >= 0 ? decoded.slice(0, separator) : decoded).slice(0, 120) || undefined
+    } catch {
+      return undefined
+    }
+  }
+  return reasonCode(form.get("client_id") || undefined)
 }
 
 async function main() {

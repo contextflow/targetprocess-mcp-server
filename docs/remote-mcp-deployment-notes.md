@@ -74,12 +74,51 @@ Optional environment:
 - `MCP_TRUST_PROXY_HEADERS`: set to `1` only when the service is reachable exclusively through a trusted reverse proxy; then audit logs use `X-Forwarded-For`/`X-Real-IP`.
 - `MCP_RESOURCE`: OAuth resource/audience, default `MCP_PUBLIC_URL + MCP_PATH`.
 - `MCP_ALLOWED_ORIGINS`: comma-separated extra HTTP origins accepted on MCP requests.
+- `MCP_OAUTH_CLIENTS_JSON`: registered MCP OAuth clients. Each entry can set `access_token_ttl_seconds`; the default is 900 seconds. Use this for clients that do not reliably refresh active MCP sessions, for example `{"client_id":"codex-local","redirect_uris":["http://127.0.0.1/callback"],"access_token_ttl_seconds":28800}`.
 - `OIDC_ALLOWED_HOSTED_DOMAINS`: comma-separated Google Workspace hosted domains required in the ID-token `hd` claim. Use this with `OIDC_ISSUER_URL=https://accounts.google.com` when you need Workspace membership, not just an email suffix.
 - `OIDC_ALLOWED_GROUPS`: comma-separated required group names.
 - `TP_TOKEN_STORE_PATH`: encrypted JSON token store path, default `/tmp/targetprocess-mcp-user-tokens.json`.
 - `MCP_OAUTH_STATE_STORE_PATH`: OAuth authorization state, code, refresh-token, and account-review resume JSON store path. Defaults to `TP_TOKEN_STORE_PATH + ".oauth-state.json"`.
 - `TP_SHARED_TOKEN`: optional service Targetprocess personal access token for read/search/get/list plus attributed comments.
 - `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ALLOWED_DOMAINS`, `OIDC_ALLOWED_HOSTED_DOMAINS`, `OIDC_AUTHORIZATION_ENDPOINT`, `OIDC_TOKEN_ENDPOINT`, `OIDC_JWKS_URI`: OIDC upstream login configuration. The explicit endpoint variables are optional when issuer discovery works.
+
+### Registering Codex as an OAuth Client
+
+The Codex client is registered on the hosted MCP server through `MCP_OAUTH_CLIENTS_JSON`. It is not configured only in `~/.codex/config.toml`; Codex local config must match a client ID that the server already knows.
+
+For a Codex CLI client, add a `codex-local` entry to the server environment:
+
+```sh
+MCP_OAUTH_CLIENTS_JSON='[
+  {
+    "client_id": "claude-org",
+    "name": "Claude org connector",
+    "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+    "allowed_origins": ["https://claude.ai"]
+  },
+  {
+    "client_id": "codex-local",
+    "name": "Codex local",
+    "redirect_uris": ["http://127.0.0.1/callback"],
+    "access_token_ttl_seconds": 28800
+  }
+]'
+```
+
+`access_token_ttl_seconds` controls the short-lived bearer token returned to that client. The default is `900` seconds. Use a longer value for Codex if active MCP sessions get stuck at the 15-minute mark instead of refreshing cleanly. Refresh tokens are still issued and persisted separately under `MCP_OAUTH_STATE_STORE_PATH`.
+
+After changing `MCP_OAUTH_CLIENTS_JSON`, restart the hosted MCP service. Then configure the local Codex CLI to use the same client ID and resource:
+
+```sh
+codex mcp remove targetprocess
+codex mcp add targetprocess \
+  --url https://mcp.example.com/mcp \
+  --oauth-client-id codex-local \
+  --oauth-resource https://mcp.example.com/mcp
+codex mcp login targetprocess
+```
+
+For a temporary development tunnel, replace `https://mcp.example.com/mcp` with the full public tunnel resource. If the tunnel URL changes, update both the hosted server `MCP_PUBLIC_URL`/`MCP_RESOURCE` and the local Codex MCP entry.
 
 For production, put `TP_TOKEN_STORE_PATH` and `MCP_OAUTH_STATE_STORE_PATH` on a persistent encrypted volume or replace the file-store implementations with a managed database/secret store. The current in-repo implementation is a single-instance encrypted credential file plus a single-instance OAuth state file.
 
@@ -94,8 +133,8 @@ Changing OIDC allowlist settings affects new OIDC callbacks. Already-issued MCP 
 - Keep `TP_SHARED_TOKEN` limited in Targetprocess, because every service-token user shares that Targetprocess principal for API authorization.
 - Never log tokens, API keys, or raw authorization headers.
 - Restrict outbound network access to the Targetprocess host.
-- JSON audit logs are written to stdout for HTTP requests, security failures, and tool calls.
-- Prometheus metrics cover request outcomes, auth/security failures, tool calls, rate-limit denials, and active sessions.
+- JSON audit logs are written to stdout for HTTP requests, security failures, request failures, and tool calls.
+- Prometheus metrics cover request outcomes, auth/security failures, request failures by stage/reason, tool calls, rate-limit denials, and active sessions.
 - Destructive tools such as ticket deletion are disabled by default and configurable per user.
 - Do not rely on `User-Agent`, DNS, or `Origin` alone to decide whether a caller is Claude, Gemini, or Codex; those signals are spoofable. The enforceable boundary is the registered OAuth client allowlist plus organization OIDC policy.
 - OAuth authorization state, authorization codes, refresh grants, and account-review resumes are persisted under `MCP_OAUTH_STATE_STORE_PATH`. MCP session maps and rate-limit counters are still process-local; multi-replica deployments need sticky sessions or a shared state store.
@@ -132,6 +171,18 @@ services.fail2ban = {
 ```
 
 Run `nix flake check` before deploying changes.
+
+## Failure Debugging
+
+Use the structured `tp_mcp_request_failure` audit event to debug why hosted MCP usage fails. It includes stable fields such as `requestId`, `route`, `status`, `stage`, `reason`, `clientId`, `userEmail`, `toolName`, and sanitized Targetprocess request metadata (`targetprocessMethod`, `targetprocessPath`, `targetprocessStatus`). It intentionally does not log authorization headers, cookies, OAuth codes, access tokens, refresh tokens, Targetprocess personal tokens, raw tool arguments, request bodies, or Targetprocess response bodies.
+
+Example journal filter:
+
+```sh
+journalctl -u targetprocess-mcp.service -o cat | jq 'select(.event == "tp_mcp_request_failure")'
+```
+
+Keep fail2ban or similar blocking automation tied to `tp_mcp_security_failure`; `tp_mcp_request_failure` is broader debugging telemetry and includes expected user/configuration failures.
 
 ## Useful References
 
