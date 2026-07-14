@@ -15,10 +15,14 @@ const mockTp = {
   updateBug: vi.fn(),
   updateUserStorySubState: vi.fn(),
   getLastRequestDiagnostic: vi.fn(),
+  getLastRequestWarning: vi.fn(),
+  getBaseUrl: vi.fn(() => 'https://example.tpondemand.com'),
 } as unknown as TpClient
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(mockTp.getLastRequestDiagnostic).mockReturnValue(undefined)
+  vi.mocked(mockTp.getLastRequestWarning).mockReturnValue(undefined)
 })
 
 describe('handleCreateBug', () => {
@@ -30,6 +34,17 @@ describe('handleCreateBug', () => {
 
     expect(parsed.Id).toBe(500)
     expect(parsed.Name).toBe('Login fails')
+    expect(parsed.url).toBe('https://example.tpondemand.com/entity/500')
+  })
+
+  it('returns a warning when the requested origin could not be applied', async () => {
+    vi.mocked(mockTp.createBugOnly).mockResolvedValue({ Id: 500, Name: 'Login fails' } as any)
+    vi.mocked(mockTp.getLastRequestWarning).mockReturnValue('Origin was not applied')
+
+    const result = await handleCreateBug(mockTp, { title: 'Login fails', bugContent: '<div>Steps...</div>' })
+    const parsed = JSON.parse(result.content[0].text)
+
+    expect(parsed.warning).toBe('Origin was not applied')
   })
 
   it('returns failure message when null', async () => {
@@ -38,6 +53,24 @@ describe('handleCreateBug', () => {
     const result = await handleCreateBug(mockTp, { title: 'Login fails', bugContent: '<div>Steps</div>' })
 
     expect(result.content[0].text).toContain('Failed to create bug "Login fails"')
+    expect(result.content[0].text).toContain('JSON: null')
+  })
+
+  it('includes request diagnostics on create failure', async () => {
+    vi.mocked(mockTp.createBugOnly).mockResolvedValue(null as any)
+    vi.mocked(mockTp.getLastRequestDiagnostic).mockReturnValue({
+      method: 'POST',
+      url: 'https://example.tpondemand.com/api/v1/bugs/?format=json&access_token=***',
+      message: 'HTTP error! status: 400',
+      status: 400,
+      body: '{"Message":"Entity state is invalid"}',
+    })
+
+    const result = await handleCreateBug(mockTp, { title: 'Login fails', bugContent: '<div>Steps</div>' })
+
+    expect(result.content[0].text).toContain('Error: HTTP error! status: 400')
+    expect(result.content[0].text).toContain('Status: 400')
+    expect(result.content[0].text).toContain('Body: {"Message":"Entity state is invalid"}')
   })
 
   it('calls createBugOnly with all params', async () => {
@@ -45,10 +78,12 @@ describe('handleCreateBug', () => {
 
     await handleCreateBug(mockTp, {
       title: 'Bug', bugContent: 'content', origin: 'Manual QA', projectId: '10', teamId: '20',
+      entityStateId: '30',
     })
 
     expect(mockTp.createBugOnly).toHaveBeenCalledWith({
       title: 'Bug', bugContent: 'content', origin: 'Manual QA', projectId: '10', teamId: '20',
+      entityStateId: '30',
     })
   })
 })

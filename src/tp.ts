@@ -131,6 +131,7 @@ export class TpClient {
   private dispatcher: Dispatcher | undefined
   private loggedInOwnerId: string | undefined
   private lastRequestDiagnostic: TpRequestDiagnostic | undefined
+  private lastRequestWarning: string | undefined
   private readonly v2 = '/api/v2'
   private readonly debugHttp = process.env.TP_DEBUG_HTTP === "1"
 
@@ -211,8 +212,13 @@ export class TpClient {
     return this.lastRequestDiagnostic
   }
 
+  getLastRequestWarning(): string | undefined {
+    return this.lastRequestWarning
+  }
+
   clearLastRequestDiagnostic(): void {
     this.lastRequestDiagnostic = undefined
+    this.lastRequestWarning = undefined
   }
 
   private errorMessage(error: unknown): string {
@@ -371,13 +377,18 @@ export class TpClient {
         body: JSON.stringify(data),
       });
       const text = await response.text()
+      this.debug("TP_POST_RESPONSE", {
+        status: response.status,
+        ok: response.ok,
+        body: text ? this.truncate(this.redactText(text)) : "<empty>",
+      })
       if (!response.ok) {
         this.recordRequestDiagnostic({
           method: "POST",
           url: _url,
           message: `HTTP error! status: ${response.status}`,
           status: response.status,
-          body: text,
+          body: text || "<empty>",
         })
         const diagnostic = this.getLastRequestDiagnostic()
         console.error("Error making TP request:", diagnostic?.message);
@@ -385,8 +396,30 @@ export class TpClient {
         return null
       }
 
+      if (!text) {
+        this.recordRequestDiagnostic({
+          method: "POST",
+          url: _url,
+          message: "Targetprocess returned an empty response body",
+          status: response.status,
+          body: "<empty>",
+        })
+        return null
+      }
+
       try {
-        return (text ? JSON.parse(text) : null) as U
+        const parsed = JSON.parse(text)
+        if (parsed === null) {
+          this.recordRequestDiagnostic({
+            method: "POST",
+            url: _url,
+            message: "Targetprocess returned JSON null",
+            status: response.status,
+            body: text,
+          })
+          return null
+        }
+        return parsed as U
       } catch (error) {
         this.recordRequestDiagnostic({
           method: "POST",
@@ -409,6 +442,28 @@ export class TpClient {
       console.error("Error making TP request:", error);
       return null;
     }
+  }
+
+  private async postBugWithOriginFallback<T>(bug: Record<string, any>): Promise<T | null> {
+    const params = {
+      pathParam: ["bugs"],
+      param: { "format": "json" },
+    }
+    const response = await this.post<Record<string, any>, T>(params, bug)
+    const diagnostic = this.getLastRequestDiagnostic()
+    const origin = bug.customFields?.find((field: { name?: string }) => field.name === "Origin")?.value
+    const originFieldMissing = diagnostic?.status === 400
+      && diagnostic.body?.includes("There's no Origin custom field in this Project.")
+
+    if (response || !origin || !originFieldMissing) return response
+
+    const fallbackBug = { ...bug }
+    delete fallbackBug.customFields
+    const fallbackResponse = await this.post<Record<string, any>, T>(params, fallbackBug)
+    if (fallbackResponse) {
+      this.lastRequestWarning = `Origin "${origin}" was not applied because the target project does not define the Origin custom field.`
+    }
+    return fallbackResponse
   }
 
   // Like post(), but on failure returns the HTTP status and raw response body
@@ -675,10 +730,7 @@ export class TpClient {
 
     if (entityStateId) bug["EntityState"] = { "Id": entityStateId }
 
-    return this.post<any, T>({
-      pathParam: ["bugs"],
-      param: { "format": "json" },
-    }, bug) as T
+    return this.postBugWithOriginFallback<T>(bug) as T
   }
 
   async createUserStory<T>({ title, description, featureId, releaseId, projectId, teamId }: { title: string, description?: string, featureId?: string, releaseId?: string, projectId?: string, teamId?: string }): Promise<T> {

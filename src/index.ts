@@ -822,7 +822,7 @@ server.registerTool(
       ])
         .default("Manual QA")
         .optional()
-        .describe('Where the bug was found, defaults to "Manual QA" if no origin was specified'),
+        .describe('Where the bug was found, defaults to "Manual QA" if no origin was specified. If the target project has no Origin custom field, the Bug is created without it and the result includes a warning.'),
       projectId: z.string()
         .optional()
         .describe('Optional Project ID — if user gave a project name, resolve it via "get_projects" first; defaults to TP_PROJECT_ID from config'),
