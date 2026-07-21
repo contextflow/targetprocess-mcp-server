@@ -224,7 +224,19 @@ export interface Task {
   ResourceType: string
   Id: number
   Name: string
+  Description?: string | null
+  CreateDate?: string
+  ModifyDate?: string
   EntityState: EntityState
+  Project?: Project
+  Team?: Team | null
+  ResponsibleTeam?: ResponsibleTeam | null
+  AssignedUser?: Owner | null
+  Effort?: number
+  EffortCompleted?: number
+  EffortToDo?: number
+  TimeSpent?: number
+  TimeRemain?: number
   UserStory: {
     ResourceType: string
     Id: number
@@ -393,6 +405,8 @@ export interface Team {
 export interface ResponsibleTeam {
   ResourceType: string
   Id: number
+  Team?: Team
+  EntityState?: EntityState
 }
 
 export interface PortfolioEpic {

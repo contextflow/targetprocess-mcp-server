@@ -1026,6 +1026,28 @@ export class TpClient {
     return response
   }
 
+  async getTaskComments<T>(taskId: string, results: number = 25): Promise<T> {
+    return this.get<T>({
+      pathParam: ["Tasks", taskId, "Comments"],
+      param: {
+        "format": "json",
+        "take": results,
+        "include": "[Id,Description,CreateDate,Owner[Id,FullName]]",
+      },
+    }) as T
+  }
+
+  async getUserStoryTasks<T>(userStoryId: string, results: number = 100): Promise<T> {
+    return this.get<T>({
+      pathParam: ["UserStories", userStoryId, "Tasks"],
+      param: {
+        "format": "json",
+        "take": results,
+        "include": "[Id,Name,Description,CreateDate,ModifyDate,EntityState[Id,Name],Project[Id,Name],Team[Id,Name],ResponsibleTeam[Id,Team[Id,Name],EntityState[Id,Name]],AssignedUser[Id,FullName],Effort,EffortCompleted,EffortToDo,TimeSpent,TimeRemain]",
+      },
+    }) as T
+  }
+
   async searchContainsNameText<T>({ text, entityType, take = 25 }: { text: string, entityType: TpEntityCollection, take?: number }): Promise<T> {
     return this.get<T>({
       pathParam: [entityType],
@@ -1328,7 +1350,7 @@ export class TpClient {
       pathParam: ["Tasks", taskId],
       param: {
         "format": "json",
-        "include": "[Id,Name,UserStory[Id,Name,Feature[Id,Name]]]",
+        "include": "[Id,Name,Description,CreateDate,ModifyDate,EntityState[Id,Name],Project[Id,Name],Team[Id,Name],ResponsibleTeam[Id,Team[Id,Name],EntityState[Id,Name]],AssignedUser[Id,FullName],Effort,EffortCompleted,EffortToDo,TimeSpent,TimeRemain,UserStory[Id,Name,Feature[Id,Name]]]",
       }
     }) as T
 

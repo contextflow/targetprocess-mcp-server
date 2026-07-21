@@ -47,8 +47,11 @@ Features
 
 User Stories
 - `get_user_story_bugs` — Get all bugs linked to a user story by its ID (id)
+- `get_user_story_tasks` — Get child tasks with states, assignments, estimates, pagination metadata, and direct URLs (id, optional results)
 
 Tasks
+- `get_task_content` — Get a task with its description, parent story, state, assignments, estimates, and direct URL (id)
+- `get_task_comments` — Get task comments with author, timestamp, rich HTML, plain text, and pagination metadata (id, optional results)
 - `get_in_progress_tasks_and_bugs` — Get all Tasks and Bugs currently in "In Progress" state assigned to a given user (userId)
 - `create_task` — Create a new task linked to a user story (title, userStoryId, optional description/projectId/teamId/entityStateId)
 > [!NOTE]
@@ -319,6 +322,7 @@ nix develop           # enter a Node 22 development shell
 | `release_tools.test.ts` | `get_release_user_stories`, `get_release_bugs`, `get_release_features`, `get_release_open_bugs`, `get_release_open_user_stories` |
 | `user_team_tools.test.ts` | `get_users`, `get_teams`, `get_teams_and_team_assignments` |
 | `comment_tools.test.ts` | `add_comment`, `get_user_story_comments`, `get_bug_comments` |
+| `task_read_tools.test.ts` | `get_user_story_tasks`, `get_task_content`, `get_task_comments` |
 | `card_metadata_tools.test.ts` | `add_card_labels`, `add_file_attachment` |
 | `internal_cards.test.ts` | `get_internal_card_types`, `search_internal_cards`, `get_internal_card`, `create_internal_card`, `delete_internal_card` |
 | `creation_tools.test.ts` | `create_bug`, `create_user_story`, `create_feature`, `create_task`, `update_bug`, `update_user_story_state` |

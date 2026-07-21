@@ -26,6 +26,9 @@ import { handleGetTeams, handleGetTeamsAndTeamAssignments } from "./handlers/get
 import { handleAddComment, handleCanComment } from "./handlers/add_comment.js";
 import { handleGetUserStoryComments } from "./handlers/get_user_story_comments.js";
 import { handleGetBugComments } from "./handlers/get_bug_comments.js";
+import { handleGetTaskComments } from "./handlers/get_task_comments.js";
+import { handleGetTaskContent } from "./handlers/get_task_content.js";
+import { handleGetUserStoryTasks } from "./handlers/get_user_story_tasks.js";
 import { handleCreateBug } from "./handlers/create_bug.js";
 import { handleCreateUserStory } from "./handlers/create_user_story.js";
 import { handleCreateFeature } from "./handlers/create_feature.js";
@@ -781,6 +784,43 @@ server.registerTool(
 )
 
 server.registerTool(
+  'get_task_comments',
+  {
+    title: 'Get task comments',
+    description: 'Get paginated comments for a Targetprocess Task, preserving rich HTML and plain text.',
+    inputSchema: {
+      id: z.string()
+        .min(5)
+        .max(6)
+        .describe('Targetprocess Task ID'),
+      results: z.number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(25)
+        .optional()
+        .describe('Maximum comments to return, default is 25'),
+    },
+  },
+  async ({ id, results }) => handleGetTaskComments(tp, id, results)
+)
+
+server.registerTool(
+  'get_task_content',
+  {
+    title: 'Get task content',
+    description: 'Get a Targetprocess Task with its description, parent story, state, assignments, estimates, and direct URL.',
+    inputSchema: {
+      id: z.string()
+        .min(5)
+        .max(6)
+        .describe('Targetprocess Task ID'),
+    },
+  },
+  async ({ id }) => handleGetTaskContent(tp, id)
+)
+
+server.registerTool(
   'create_bug_based_on_card',
   {
     title: 'Create a new bug card based on provided card id',
@@ -1529,6 +1569,28 @@ server.registerTool(
     },
   },
   async ({ id }) => handleGetUserStoryBugs(tp, id)
+);
+
+server.registerTool(
+  'get_user_story_tasks',
+  {
+    title: 'Get user story tasks',
+    description: 'Get child Tasks for a Targetprocess user story with states, assignments, estimates, and direct URLs.',
+    inputSchema: {
+      id: z.string()
+        .min(5)
+        .max(6)
+        .describe('Targetprocess user story ID'),
+      results: z.number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(100)
+        .optional()
+        .describe('Maximum tasks to return, default is 100'),
+    },
+  },
+  async ({ id, results }) => handleGetUserStoryTasks(tp, id, results)
 );
 
 server.registerTool(
